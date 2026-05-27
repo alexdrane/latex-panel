@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "latex-panel"
+version = "0.1.0"
+description = "Floating GTK window for rendering markdown+LaTeX from Claude"
+requires-python = ">=3.9"
+dependencies = [
+    "markdown-it-py",
+]
+
+[project.scripts]
+latex-panel = "latexpanel.renderer:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
