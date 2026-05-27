@@ -27,6 +27,20 @@ MathJax = {{
 }};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+<script>
+function mcqSelect(btn, correct) {{
+  var mcq = btn.closest('.mcq');
+  if (mcq.dataset.solved) return;
+  if (correct) {{
+    btn.classList.add('correct');
+    mcq.dataset.solved = '1';
+    mcq.querySelectorAll('.option').forEach(function(b) {{ b.classList.add('disabled'); }});
+  }} else {{
+    btn.classList.add('wrong');
+    btn.classList.add('disabled');
+  }}
+}}
+</script>
 <style>
   body {{
     font-family: 'Linux Libertine', Georgia, serif;
@@ -61,6 +75,55 @@ MathJax = {{
     padding-left: 16px;
     color: #555;
   }}
+  details {{
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 8px 14px;
+    margin: 1em 0;
+    background: #f7f7f5;
+  }}
+  details summary {{
+    cursor: pointer;
+    font-weight: 600;
+    color: #444;
+    user-select: none;
+    padding: 2px 0;
+    list-style: none;
+  }}
+  details summary::-webkit-details-marker {{ display: none; }}
+  details summary::before {{ content: "\\25B6  "; font-size: 0.75em; color: #888; }}
+  details[open] summary::before {{ content: "\\25BC  "; }}
+  details[open] summary {{ margin-bottom: 8px; }}
+  .mcq {{
+    border: 1px solid #c5c5c0;
+    border-radius: 5px;
+    padding: 14px 16px;
+    margin: 1.2em 0;
+    background: #f9f9f7;
+  }}
+  .mcq .question {{
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: #222;
+  }}
+  .mcq .option {{
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 7px 12px;
+    margin: 4px 0;
+    border: 1px solid #ddd;
+    border-radius: 3px;
+    background: white;
+    cursor: pointer;
+    font-size: 14px;
+    font-family: inherit;
+    transition: background 0.12s;
+  }}
+  .mcq .option:hover:not(.disabled) {{ background: #efefeb; }}
+  .mcq .option.correct {{ background: #d4edda; border-color: #28a745; color: #155724; font-weight: 600; }}
+  .mcq .option.wrong {{ background: #f8d7da; border-color: #dc3545; color: #721c24; }}
+  .mcq .option.disabled {{ cursor: default; }}
 </style>
 </head>
 <body>{body}</body>
@@ -75,10 +138,49 @@ def md_to_html(text: str) -> str:
     stash: dict[str, str] = {}
     counter = [0]
 
-    def stash_match(m: re.Match) -> str:
-        key = f"MATHSTASH{counter[0]}Z"
-        stash[key] = m.group(0)
+    def new_key() -> str:
+        k = f"STASH{counter[0]}Z"
         counter[0] += 1
+        return k
+
+    # :::spoiler [Title]\n...\n:::
+    def replace_spoiler(m: re.Match) -> str:
+        title = m.group(1).strip() or "Show"
+        inner_html = md_to_html(m.group(2))
+        key = new_key()
+        stash[key] = f'<details><summary>{title}</summary>{inner_html}</details>'
+        return f'\n{key}\n'
+
+    text = re.sub(
+        r'^:::spoiler(.*?)\n([\s\S]*?)^:::[ \t]*$',
+        replace_spoiler, text, flags=re.MULTILINE
+    )
+
+    # ?? Question\n( ) wrong\n(*) correct\n...
+    def replace_mcq(m: re.Match) -> str:
+        question = m.group(1).strip()
+        options_raw = m.group(2)
+        tuples = re.findall(r'\(([* ])\)\s*(.+)', options_raw)
+        opts_html = ''.join(
+            f'<button class="option" onclick="mcqSelect(this,{str(mk == "*").lower()})">'
+            f'{ot.strip()}</button>'
+            for mk, ot in tuples
+        )
+        key = new_key()
+        stash[key] = (
+            f'<div class="mcq"><div class="question">{question}</div>{opts_html}</div>'
+        )
+        return f'\n{key}\n'
+
+    text = re.sub(
+        r'^\?\?\s*(.+?)\n((?:[ \t]*\([ *]\)[ \t]*.+\n?)+)',
+        replace_mcq, text, flags=re.MULTILINE
+    )
+
+    # Stash math so markdown doesn't mangle it
+    def stash_match(m: re.Match) -> str:
+        key = new_key()
+        stash[key] = m.group(0)
         return key
 
     text = re.sub(r'\$\$[\s\S]+?\$\$', stash_match, text)
