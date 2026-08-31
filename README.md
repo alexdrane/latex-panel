@@ -25,12 +25,32 @@ pip install -e .
 
 ## Usage
 
+### As a Claude Code skill (recommended)
+
+Symlink this repo into your skills directory:
+```bash
+ln -sfn "$PWD" ~/.claude/skills/latex-panel
+```
+
+Claude then loads [`SKILL.md`](SKILL.md) automatically whenever a session turns to
+maths/physics, revision, or quizzing. It launches the window itself (via
+`scripts/panel.sh`, which is idempotent) and writes responses to it — no manual
+startup, and the LaTeX/MCQ/diagram syntax reference travels with the skill.
+
+```bash
+scripts/panel.sh ensure   # start the window if not already running
+scripts/panel.sh status   # running? / not running
+scripts/panel.sh stop     # close it
+```
+
+### Standalone
+
 Start the panel in the background:
 ```bash
 latex-panel &
 ```
 
-The panel watches `/tmp/claude_response.md`. Anything written there is rendered immediately. With Claude Code, configure it (or ask Claude) to write maths/physics responses to that file.
+The panel watches `/tmp/claude_response.md`. Anything written there is rendered immediately.
 
 ### Controls
 
