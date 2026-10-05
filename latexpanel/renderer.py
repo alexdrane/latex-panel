@@ -342,6 +342,38 @@ def md_to_html(text: str) -> str:
         counter[0] += 1
         return k
 
+    # :::video /abs/path/to/clip.mp4 [caption]   (Manim renders; see panel.sh manim)
+    def replace_video(m: re.Match) -> str:
+        path = m.group(1)
+        cap = html_mod.escape((m.group(2) or "").strip())
+        key = new_key()
+        rates = "".join(
+            f'<button onclick="var f=this.closest(\'figure\'),v=f.querySelector(\'video\');'
+            f'v.playbackRate={r};window._vrate={r};'
+            f'f.querySelectorAll(\'.vspd\').forEach(function(b){{b.classList.toggle(\'on\',b===this)}},this)" '
+            f'class="vspd{" on" if r == 0.75 else ""}">{r:g}\u00d7</button>'
+            for r in (0.25, 0.5, 0.75, 1)
+        )
+        stash[key] = (
+            '<figure class="mvid"><style>'
+            '.mvid{margin:1em auto;text-align:center}'
+            '.mvid video{max-width:100%;border-radius:6px;background:#000}'
+            '.mvid .vctl{margin-top:4px;font-size:12px}'
+            '.mvid button{margin:0 2px;padding:2px 8px;border:1px solid #888;border-radius:4px;background:transparent;color:inherit;cursor:pointer}'
+            '.mvid button.on{background:#4a90d9;color:#fff;border-color:#4a90d9}'
+            '.mvid figcaption{font-size:13px;opacity:.75;margin-top:4px}'
+            '</style>'
+            f'<video src="file://{html_mod.escape(path, quote=True)}" autoplay loop muted controls '
+            'onloadedmetadata="this.playbackRate=window._vrate||0.75"></video>'
+            f'<div class="vctl">{rates}'
+            '<button onclick="var v=this.closest(\'figure\').querySelector(\'video\');v.currentTime=0;v.play()">\u21bb</button></div>'
+            + (f'<figcaption>{cap}</figcaption>' if cap else '')
+            + '</figure>'
+        )
+        return f'\n{key}\n'
+
+    text = re.sub(r'^:::video[ \t]+(\S+)(?:[ \t]+(.*))?$', replace_video, text, flags=re.MULTILINE)
+
     # :::tikz
     def replace_tikz(m: re.Match) -> str:
         key = new_key()
