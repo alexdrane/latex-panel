@@ -5,6 +5,7 @@ import os
 import json
 import datetime
 import re
+import uuid
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -497,9 +498,16 @@ def md_to_html(text: str) -> str:
     return html
 
 
-def build_page(md_text: str, saved_answers: dict | None = None, saved_ia: dict | None = None) -> str:
+def render_body(md_text: str) -> str:
+    """Markdown → html body; afterwards interactive.BLOCKS describes the document's blocks."""
     interactive.begin_document()
-    body = md_to_html(md_text)
+    return md_to_html(md_text)
+
+
+def build_page(md_text: str, saved_answers: dict | None = None, saved_ia: dict | None = None,
+               body: str | None = None) -> str:
+    if body is None:
+        body = render_body(md_text)
     html = HTML_TEMPLATE.format(body=body)
     inject = ''
     if saved_answers:
@@ -513,12 +521,16 @@ def build_page(md_text: str, saved_answers: dict | None = None, saved_ia: dict |
 # ---------------------------------------------------------------------------
 # History
 # ---------------------------------------------------------------------------
+SESSION = uuid.uuid4().hex[:6]   # card uids from an earlier panel process must never alias new ones
+
+
 class HistoryEntry:
     _next_uid = 1
 
     def __init__(self, text: str):
-        self.uid = HistoryEntry._next_uid          # stable across deletes (indices shift)
+        self.uid = f"{SESSION}-{HistoryEntry._next_uid}"   # stable across deletes (indices shift)
         HistoryEntry._next_uid += 1
+        self.rev = 1                               # bumped whenever what Alex is deciding on changes
         self.text = text
         self.versions: list[str] = []              # earlier texts, before in-place edits
         self.edited_at: datetime.datetime | None = None
@@ -530,13 +542,14 @@ class HistoryEntry:
         self.decisions: dict[str, dict] = {}    # interactive block id → last event
         self.pins: dict[str, list] = {}         # viewer id → pin events
         self.blocks: list[tuple] = []           # (kind, id, source hash) of interactive blocks, filled on render
-        self.suggestions: dict[str, dict] = {}  # paragraph index → {html, seq} (in-place rewrites)
-        self.pending_rw: set[int] = set()       # paragraphs waiting on a rewrite
+        self.suggestions: dict[str, dict] = {}  # paragraph index → {id, html, seq, src, new} (in-place rewrites)
+        self.rw_count = 0                        # proposal counter: each new proposal gets a fresh block id
+        self.pending_rw: dict[int, int] = {}    # paragraph → seq of the rewrite request waiting on it
         self.ticks: list[tuple] = []            # (checklist id, item, state) in order applied
         self.replies: list[tuple] = []          # (block id or None, text, iso ts)
 
     def ids(self) -> set[str]:
-        return {b[1] for b in self.blocks} | {f"rw-{s['seq']}" for s in self.suggestions.values()}
+        return {b[1] for b in self.blocks} | {s["id"] for s in self.suggestions.values()}
 
     @property
     def title(self) -> str:
@@ -684,32 +697,57 @@ class RendererWindow(Gtk.Window):
                     "Claude sees them next time it checks (panel.sh events)")
         return True
 
-    def _emit(self, data: dict) -> dict:
+    def _emit(self, data: dict, entry: "HistoryEntry | None" = None) -> dict:
         n = len(self._history)
-        if self._pos >= 0:
+        if entry is None and self._pos >= 0:
             entry = self._history[self._pos]
-            data.update(entry=self._pos + 1, entries=n, stale=self._pos != n - 1,
+        if entry is not None and entry in self._history:
+            i = self._history.index(entry)
+            data.update(entry=i + 1, entries=n, stale=i != n - 1, card=entry.uid, rev=entry.rev,
                         entry_title=entry.title, entry_ts=entry.timestamp.isoformat())
         return events.append(data)
+
+    def _notice(self, text: str, **extra):
+        """Tell the Claude session something it asked for didn't happen (shows up in watch/events)."""
+        print(f"panel: {text}", file=sys.stderr)
+        events.append({"type": "panel_error", "text": text, **extra})
+
+    def _entry_by_uid(self, uid):
+        return next((e for e in self._history if e.uid == uid), None)
 
     def _on_claude_event(self, _mgr, js_result):
         try:
             data = json.loads(js_result.get_js_value().to_json(0))
-            ev = self._emit(data)
+            cid = data.get("cid")
+            # the page says which card + revision the click was made on; never guess another one
+            entry = self._entry_by_uid(data.pop("card", None))
+            page_rev = data.pop("rev", None)
+            if entry is None or (page_rev is not None and page_rev != entry.rev):
+                why = "that card was deleted" if entry is None else \
+                      f"the card was revised (r{page_rev} → r{entry.rev}) after it was shown"
+                self._notice(f"ignored a stale {data.get('type')} click: {why}", rejected=data)
+                if cid:
+                    self._js(f"IA.refused({json.dumps(cid)}, {json.dumps('Not sent - ' + why + '. Reloading.')})")
+                if entry is not None and self._shown(entry):
+                    GLib.timeout_add(1200, lambda: (self._reload_keep_scroll(), False)[1])
+                return
+            ev = self._emit(data, entry)
             t = data.get("type")
-            if self._pos >= 0:
-                entry = self._history[self._pos]
-                self._seq_map[ev["seq"]] = (entry, ev)
-                if t == "rewrite":
-                    entry.pending_rw.add(int(data["para"]))
-                elif t == "check":
-                    entry.ticks.append((data["id"], data["item"], data["state"]))
-                elif t == "pin":
-                    entry.pins.setdefault(data["id"], []).append(ev)
-                elif data.get("id") and t not in ("selection", "message", "check_add"):
-                    entry.decisions[data["id"]] = ev
-            if data.get("cid"):
-                self._js(f"IA.sent({json.dumps(data['cid'])}, {ev['seq']})")
+            self._seq_map[ev["seq"]] = (entry, ev)
+            if t == "rewrite":
+                entry.pending_rw[int(data["para"])] = ev["seq"]
+            elif t == "check":
+                entry.ticks.append((data["id"], data["item"], data["state"]))
+            elif t == "pin":
+                entry.pins.setdefault(data["id"], []).append(ev)
+            elif data.get("id") and t not in ("selection", "message", "check_add"):
+                entry.decisions[data["id"]] = ev
+            if cid:
+                self._js(f"IA.sent({json.dumps(cid)}, {ev['seq']})")
+            if t == "diff" and data.get("decision") == "approve":
+                sg = next((s for s in entry.suggestions.values() if s["id"] == data.get("id")), None)
+                if sg:
+                    self._commit_rewrite(entry, sg)
             self._update_pending()
         except Exception as e:
             print(f"claudeEvent failed: {e}", file=sys.stderr)
@@ -758,43 +796,88 @@ class RendererWindow(Gtk.Window):
             target, bid, entry = msg["target"], None, None
             if target.startswith("#") and target[1:].isdigit():
                 entry, ev = self._seq_map.get(int(target[1:]), (None, {}))
+                if entry is None or entry not in self._history:
+                    self._notice(f"reply to {target} not shown: that event isn't from a card still in this panel "
+                                 "(panel restarted, or card deleted)", text_was=msg["text"][:200])
+                    return
                 bid = ev.get("id") or None
             else:
                 entry = self._entry_for_id(target)
-                bid = target if entry else None
-            if entry is None:
-                entry = self._history[self._pos] if self._pos >= 0 else None
-            if entry is None:
-                return
+                if entry is None:
+                    self._notice(f"reply to '{target}' not shown: no block with that id in the panel",
+                                 text_was=msg["text"][:200])
+                    return
+                bid = target
             entry.replies.append((bid, msg["text"], now))
             if self._shown(entry):
                 self._js(f"IA.reply({json.dumps(bid)}, {json.dumps(msg['text'])}, {json.dumps(now)})")
         elif kind == "suggest":
-            entry, ev = self._seq_map.get(int(msg["seq"]), (None, None))
-            if not ev or ev.get("type") != "rewrite":
-                print(f"suggest: event #{msg['seq']} is not a rewrite request from this panel session", file=sys.stderr)
-                return
-            para, seq = int(ev["para"]), ev["seq"]
-            label = " ".join(ev.get("instruction", "").split())[:50]
-            html = md_to_html(f":::diff rw-{seq} Rewrite ({label})\n{ev['text']}\n===\n{msg['text']}\n:::\n")
-            entry.suggestions[str(para)] = {"html": html, "seq": seq}
-            entry.pending_rw.discard(para)
-            if msg.get("note"):
-                entry.replies.append((f"rw-{seq}", msg["note"], now))
-            if self._shown(entry):
-                self._js(f"IA.suggest({para}, {json.dumps(html)})")
-                if msg.get("note"):
-                    self._js(f"IA.reply({json.dumps(f'rw-{seq}')}, {json.dumps(msg['note'])}, {json.dumps(now)}, true)")
+            self._suggest(msg, now)
         elif kind == "edit":
             self._apply_edit(msg)
         elif kind == "tick":
             entry = self._entry_for_id(msg["id"])
             if entry is None:
-                print(f"tick: no checklist '{msg['id']}' in history", file=sys.stderr)
+                self._notice(f"tick: no checklist '{msg['id']}' in the panel")
                 return
             entry.ticks.append((msg["id"], msg["item"], msg["state"]))
             if self._shown(entry):
                 self._js(f"IA.tick({json.dumps(msg['id'])}, {json.dumps(msg['item'])}, {json.dumps(msg['state'])})")
+
+    # ── rewrite proposals ─────────────────────────────────────────
+
+    def _suggest(self, msg: dict, now: str):
+        seq = int(msg["seq"])
+        entry, ev = self._seq_map.get(seq, (None, None))
+        if not ev or ev.get("type") != "rewrite":
+            self._notice(f"suggest #{seq} dropped: not a rewrite request from this panel session")
+            return
+        if entry not in self._history:
+            self._notice(f"suggest #{seq} dropped: its card was deleted")
+            return
+        if ev.get("rev") != entry.rev:
+            self._notice(f"suggest #{seq} dropped: the card was revised (r{ev.get('rev')} → r{entry.rev}) after the "
+                         "request, so the paragraph may have moved. Edit the card instead (panel.sh current / edit).")
+            return
+        para = int(ev["para"])
+        if entry.pending_rw.get(para) not in (None, seq) and not any(
+                s["seq"] == seq for s in entry.suggestions.values()):
+            self._notice(f"suggest #{seq} dropped: a newer rewrite request #{entry.pending_rw[para]} "
+                         "is waiting on that paragraph")
+            return
+        new, src = msg["text"].strip(), msg.get("src")
+        cur = entry.suggestions.get(str(para))
+        if cur and cur["seq"] == seq and cur["new"] == new:
+            return                                   # identical retransmission
+        if cur:                                      # replaced: the old proposal's decision must not carry over
+            entry.decisions.pop(cur["id"], None)
+            entry.replies = [r for r in entry.replies if r[0] != cur["id"]]
+        entry.rw_count += 1
+        bid = f"rw-{seq}-{entry.rw_count}"
+        label = " ".join(ev.get("instruction", "").split())[:50]
+        old_shown = src if src else ev["text"]
+        html = md_to_html(f":::diff {bid} Rewrite ({label})\n{old_shown}\n===\n{new}\n:::\n")
+        entry.suggestions[str(para)] = {"id": bid, "html": html, "seq": seq, "src": src, "new": new}
+        entry.pending_rw.pop(para, None)
+        if msg.get("note"):
+            entry.replies.append((bid, msg["note"], now))
+        if self._shown(entry):
+            self._js(f"IA.suggest({para}, {json.dumps(html)}, false, {json.dumps(bool(cur))})")
+            if msg.get("note"):
+                self._js(f"IA.reply({json.dumps(bid)}, {json.dumps(msg['note'])}, {json.dumps(now)}, true)")
+
+    def _commit_rewrite(self, entry: "HistoryEntry", sg: dict):
+        """An approved rewrite becomes part of the card's markdown (checkout, Flag, Notes all see it)."""
+        src = sg.get("src")
+        if not src or entry.text.count(src) != 1:
+            self._notice(f"rewrite {sg['id']} approved but not committed to the card: its source paragraph "
+                         "couldn't be located exactly once. Apply it with panel.sh current / edit.")
+            return
+        prefix = re.match(r"\s*(?:#{1,6}\s+|[-*+]\s+(?:\[[ xX~]\]\s+)?|\d+[.)]\s+|>\s*)?", src).group(0)
+        body = sg["new"]
+        if prefix.strip() and not body.startswith(prefix.strip()):
+            body = prefix + body
+        self._apply_edit({"uid": entry.uid, "text": entry.text.replace(src, body, 1), "committed": sg["id"]})
 
     # ── in-place edits ────────────────────────────────────────────
 
@@ -816,30 +899,13 @@ class RendererWindow(Gtk.Window):
             out += f" — “{ev['note'][:300]}”"
         return out
 
-    def _apply_edit(self, msg: dict):
-        target = msg.get("uid")
-        if target in (None, "latest"):
-            entry = self._history[-1] if self._history else None
-        elif target == "shown":
-            entry = self._history[self._pos] if self._pos >= 0 else None
-        else:
-            entry = next((e for e in self._history if e.uid == int(target)), None)
-            if entry is None:
-                print(f"edit: entry uid {target} no longer exists (deleted?) - adding as new", file=sys.stderr)
-        text = msg["text"]
-        if entry is None:               # nothing to edit (fresh panel / deleted): behave like write
-            entry = HistoryEntry(text)
-            self._history.append(entry)
-            self._pos = len(self._history) - 1
-            self._render_current()
-            return
-        if text == entry.text:
-            return
-
+    def _reconcile(self, entry: "HistoryEntry", new_blocks: list) -> set:
+        """Retire decisions/pins/ticks on blocks whose source or attached files changed. Returns their ids."""
+        if not entry.blocks:
+            entry.blocks = list(new_blocks)
+            return set()
         old = {b[1]: b for b in entry.blocks}
-        interactive.begin_document()
-        md_to_html(text)
-        new = {b[1]: b for b in interactive.BLOCKS}
+        new = {b[1]: b for b in new_blocks}
         changed = {bid for bid in old if bid not in new or new[bid] != old[bid]}
         for bid in changed:
             if bid in entry.decisions:
@@ -849,14 +915,45 @@ class RendererWindow(Gtk.Window):
         for bid in [b for b in entry.revised if b not in new]:
             entry.revised.pop(bid)
         entry.ticks = [t for t in entry.ticks if t[0] not in changed]
-        # paragraph indices may have moved: unresolved rewrite requests can't be placed any more
+        entry.blocks = list(new_blocks)
+        return changed
+
+    def _apply_edit(self, msg: dict):
+        target = msg.get("uid")
+        if target in (None, "latest"):
+            entry = self._history[-1] if self._history else None
+        elif target == "shown":
+            entry = self._history[self._pos] if self._pos >= 0 else None
+        else:
+            entry = self._entry_by_uid(target)
+        if entry is None:
+            self._notice(f"edit dropped: card {target} isn't in the panel (deleted, or the panel restarted). "
+                         "Use panel.sh write for a new card.")
+            return
+        base = msg.get("base")
+        if base is not None and base != entry.rev:
+            self._notice(f"edit dropped: card {entry.uid} is at r{entry.rev} but the edit was made on r{base} "
+                         "(it changed since your checkout). Run panel.sh current again and redo the change.")
+            return
+        text = msg["text"]
+        render_body(text)
+        changed = self._reconcile(entry, interactive.BLOCKS)
+        if text == entry.text and not changed:
+            if self._shown(entry):
+                self._reload_keep_scroll()   # same markdown: still refresh pixels of recompiled files
+            return
+        entry.rev += 1
+        # paragraph indices may have moved: unresolved rewrite requests and proposals can't be placed any more
+        for sg in entry.suggestions.values():
+            entry.decisions.pop(sg["id"], None)
         entry.suggestions.clear()
         entry.pending_rw.clear()
-
-        entry.versions.append(entry.text)
-        entry.text = text
-        entry.edited_at = datetime.datetime.now()
-        entry.blocks = list(interactive.BLOCKS)
+        if text != entry.text:
+            entry.versions.append(entry.text)
+            entry.text = text
+            entry.edited_at = datetime.datetime.now()
+        if msg.get("committed"):
+            entry.replies.append((None, "Rewrite applied to the card.", datetime.datetime.now().isoformat()))
         if self._shown(entry):
             self._reload_keep_scroll()
         else:
@@ -879,7 +976,7 @@ class RendererWindow(Gtk.Window):
         state = {
             "shown_uid": self._history[self._pos].uid if self._pos >= 0 else None,
             "entries": [{
-                "uid": e.uid, "index": i + 1, "title": e.title, "time": e.timestamp_str(),
+                "uid": e.uid, "rev": e.rev, "index": i + 1, "title": e.title, "time": e.timestamp_str(),
                 "edited": e.edited_at.strftime("%H:%M:%S") if e.edited_at else None, "text": e.text,
             } for i, e in enumerate(self._history)],
         }
@@ -900,7 +997,7 @@ class RendererWindow(Gtk.Window):
         for i in range(len(self._history) - 1, -1, -1):
             e = self._history[i]
             ids = [b[1] for b in e.blocks if b[0] in interactive.DECISION_KINDS] + \
-                  [f"rw-{sg['seq']}" for sg in e.suggestions.values()]
+                  [sg["id"] for sg in e.suggestions.values()]
             n = sum(1 for b in ids if b not in e.decisions and base(b) not in later)
             if n:
                 out.append((i, n))
@@ -1049,15 +1146,18 @@ class RendererWindow(Gtk.Window):
         n = len(self._history)
 
         try:
+            body = render_body(entry.text)
+            if self._reconcile(entry, interactive.BLOCKS):
+                entry.rev += 1      # a recompiled PDF/image: earlier sign-off no longer covers what's shown
             self._webview.load_html(
                 build_page(entry.text, entry.mcq_answers or None, {
+                    "card": entry.uid, "rev": entry.rev,
                     "decisions": entry.decisions, "pins": entry.pins, "suggestions": entry.suggestions,
                     "pending_rw": sorted(entry.pending_rw), "ticks": entry.ticks, "replies": entry.replies,
                     "cursor": self._seen, "revised": entry.revised, "old_pins": entry.old_pins,
-                    "scroll": self._restore_y}),
+                    "scroll": self._restore_y}, body=body),
                 "file:///tmp/"
             )
-            entry.blocks = list(interactive.BLOCKS)
             self._restore_y = 0
         except Exception as e:
             import traceback

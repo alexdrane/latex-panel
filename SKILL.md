@@ -42,7 +42,19 @@ $S current                 # copies the card he's looking at to ~/.local/share/l
 # Read that file, make targeted changes with the Edit tool (no need to regenerate it all)
 $S edit                    # replaces that same card; keeps his scroll position
 printf '%s' "$MD" | $S edit --latest   # or pipe a whole new version (--latest / --shown / --entry N)
+$S current --event 12      # check out the card that panel event #12 came from (answering a click)
 ```
+
+- **Every card has a revision number** (`r2`, `r3`… in event lines once it's been
+  revised). Clicks carry the card and revision they were made on. An `edit` from a
+  checkout is refused if the card changed since (`card changed since checkout`): run
+  `current` again and redo the change. Edits never fall back to creating a card. An
+  unknown or deleted card, or one from before a panel restart, is an error: use `write`.
+- When you answer a specific click, target its card with `--event SEQ` rather than relying on
+  what's on screen; he may have navigated away.
+- Recompiling a PDF/image that a block shows counts as a change to that block (and to an
+  `:::approve` wrapping it), even if the markdown is identical. Re-running `edit` with the
+  same text, or him navigating back to the card, refreshes the pixels and resets that sign-off.
 
 - Blocks whose source is unchanged keep their state: decisions, pins, ticks and replies.
 - A block whose content you changed **keeps its id** and resets to "revised · awaiting you",
@@ -51,7 +63,7 @@ printf '%s' "$MD" | $S edit --latest   # or pipe a whole new version (--latest /
   card. Pins on a recompiled PDF stay as faded "before revision" markers, so he can check
   the spots were fixed.
 - Rewrite suggestions he hasn't decided on are dropped by an edit, because paragraph
-  positions may move. Bake approved rewrites into the text when you edit.
+  positions may move. Approved rewrites are already in the card's markdown (see `suggest`).
 - `current` without flags takes the card **on screen**. If he's browsing history and says
   "change this", that's the right one. Use a new card when it's a new step or topic.
   The toolbar shows "edited HH:MM" on edited cards.
@@ -250,10 +262,17 @@ $S tick plan "§4" done
   otherwise wonder what you're doing: you're starting a long recompile, you disagree,
   or you need a clarification. Don't reply to every click.
 - **`rewrite` → `suggest`**: write only the replacement text on stdin (markdown + maths,
-  same voice). The panel inserts a diff right under the paragraph, and Approve swaps
-  the paragraph in place. If the paragraph comes from a real source (paper, notes),
-  approval is your cue to apply the same edit there. `suggest` only works for events
-  from the running panel session.
+  same voice). The panel inserts a diff right under the paragraph. **Approve writes the new
+  wording into the card's markdown**, so checkout, Flag and 📥 Notes see it, and bumps the
+  card's revision. If the paragraph comes from a real source (paper, notes), approval
+  is your cue to apply the same edit there.
+  `suggest` refuses (exit 2, with the reason) when it can't be applied safely: the card was
+  revised since the request, the card is gone, or the paragraph can't be matched to exactly
+  one paragraph of the card's markdown. Then edit the card with `current --event SEQ` /
+  `edit`. A second `suggest` for the same request replaces the first as a fresh,
+  undecided proposal. Resending identical text does nothing.
+- If the panel can't do something you asked (stale edit, reply to a deleted card's
+  event, late suggestion), a `panel #N NOT DONE: …` line arrives on the watch stream.
 - **Checklists**: when you're working through a multi-step job he's watching, write the
   plan as a `:::checklist` once, then `tick` items as you go instead of rewriting the
   panel. His ticks arrive as `check` events and his additions as `check_add`. Fold
@@ -270,7 +289,7 @@ $S tick plan "§4" done
 2. Write a panel with `:::pdf /tmp/preview/main.pdf vs=/path/to/current/main.pdf id=...`,
    plus `:::diff` for the wording and/or `:::approve` (or `:::choice` for variants).
 3. Approve → apply that exact change to the source. Changes/pins → revise, recompile
-   the preview, write v2. Approve is his sign-off for that one edit, nothing wider.
+   the preview, then update the card in place (`current --event SEQ` / `edit`). Approve is his sign-off for that one edit, nothing wider.
 
 `panel.sh write` lints the document first and prints `panel warning: ...` for missing
 files, relative paths, malformed blocks, duplicate ids or unclosed `:::` directives.

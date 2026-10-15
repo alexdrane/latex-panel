@@ -69,8 +69,26 @@ def _split_head(kind: str, head: str, flags: tuple[str, ...] = ()) -> tuple[str,
     if bid in _ids:
         WARNINGS.append(f"duplicate block id '{bid}' - clicks on both report the same id")
     _ids.add(bid)
-    BLOCKS.append((kind, bid, _h(_cur_src[0])))
+    BLOCKS.append((kind, bid, _h(_cur_src[0] + _asset_fp(_cur_src[0]))))
     return bid, got, rest.strip()
+
+
+def _asset_fp(src: str) -> str:
+    """Fingerprints of files a block shows (nested :::pdf/:::img), so a recompile invalidates its sign-off."""
+    out = []
+    for m in re.finditer(r"^:::(?:pdf|img)[ \t]+(.+)$", src, re.M):
+        try:
+            toks = shlex.split(m.group(1))
+        except ValueError:
+            continue
+        paths = [toks[0]] if toks else []
+        paths += [t[3:] for t in toks[1:] if t.startswith("vs=")]
+        for p in paths:
+            try:
+                out.append(_key(os.path.expanduser(p)))
+            except OSError:
+                out.append("missing:" + p)
+    return "|".join(out)
 
 
 def _open(kind: str, bid: str, title: str, extra: str = "") -> str:
@@ -501,10 +519,17 @@ HEAD = r"""
   IA.send = function (ev, el) {
     ev.ts = new Date().toISOString();
     ev.cid = Math.random().toString(36).slice(2, 10);
+    var sv = window._iaSaved || {};
+    if (sv.card) { ev.card = sv.card; ev.rev = sv.rev; }   // which card revision this click was made on
     try { window.webkit.messageHandlers.claudeEvent.postMessage(ev); }
     catch (e) { toast('Panel not connected', true); return false; }
     IA._out[ev.cid] = { el: el || null, type: ev.type };
     toast('Sent ✓ — waiting for Claude'); return true;
+  };
+  IA.refused = function (cid, why) {   // the panel rejected a click (card changed under it)
+    var o = IA._out[cid]; delete IA._out[cid];
+    if (o && o.el) { var s = own(o.el, '.ia-status'); if (s) { s.textContent = 'not sent'; s.classList.remove('on'); } }
+    toast(why, true);
   };
   function own(block, sel) {   // first match that belongs to this block, not a nested one
     return $all(block, sel).filter(function (el) { return el.closest('.ia') === block; })[0] || null;
@@ -978,8 +1003,12 @@ HEAD += r"""
       if (e.key === 'Escape') pop.remove();
     });
   }
-  IA.suggest = function (para, html, quiet) {
+  IA.suggest = function (para, html, quiet, replaced) {
     var el = document.querySelector('[data-para="' + para + '"]'); if (!el) return null;
+    IA.all(document, '.ia-sugg [data-rw="' + para + '"]').forEach(function (b) {   // superseded proposal
+      if (el._orig !== undefined) { el.innerHTML = el._orig; el.classList.remove('rw-applied'); }
+      b.closest('.ia-sugg').remove();
+    });
     var w = document.createElement('div'); w.className = 'ia-sugg'; w.innerHTML = html;
     var block = w.querySelector('.ia'); if (!block) return null;
     block.dataset.rw = para;

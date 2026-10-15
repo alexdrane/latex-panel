@@ -3,8 +3,8 @@
 #
 #   panel.sh ensure   - launch the panel if it is not already running (default)
 #   panel.sh write     - read markdown from stdin, render it as a NEW card (implies ensure)
-#   panel.sh current [--latest|--entry N]  - copy a card's markdown to edit.md (prints the path)
-#   panel.sh edit [--latest|--shown|--entry N] [FILE] - replace a card IN PLACE from stdin/FILE/edit.md
+#   panel.sh current [--latest|--entry N|--event SEQ]  - copy a card's markdown to edit.md (prints the path)
+#   panel.sh edit [--latest|--shown|--entry N|--event SEQ] [FILE] - replace a card IN PLACE from stdin/FILE/edit.md
 #   panel.sh status   - report whether the panel is running
 #   panel.sh stop     - close the panel
 #   panel.sh manim [-q l|m|h] [-s Scene]  - OPTIONAL: Manim scene .py on stdin -> render ->
