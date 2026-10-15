@@ -160,7 +160,7 @@ function _deckUpdateBar() {{
 
 function _deckKey(e) {{
   if (!window._deckMode) return;
-  if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  if (e.target && (/^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(e.target.tagName) || e.target.isContentEditable)) return;
   var mcq  = window._deck[window._deckIdx];
   var opts = mcq ? Array.from(mcq.querySelectorAll('.option')) : [];
 
@@ -309,7 +309,7 @@ function _deckFinish() {{
   }}
   #dk-prog  {{ font-weight: 700; color: #263240; }}
   #dk-score {{ color: #3f536a; }}
-  .dk-hint  {{ color: #7f97b3; font-size: 12px; }}
+  .dk-hint  {{ color: #3f536a; font-size: 12px; }}
   /* MCQ */
   .mcq {{
     border: 1px solid #b7c2ce;
@@ -482,6 +482,8 @@ def md_to_html(text: str) -> str:
             interactive.WARNINGS.append(f"unrecognised or unclosed directive ':::{left}' (shown as text)")
 
     text = re.sub(r'\$\$[\s\S]+?\$\$', stash_match, text)
+    text = re.sub(r'\\\[[\s\S]+?\\\]', stash_match, text)        # \[ ... \]
+    text = re.sub(r'\\\([\s\S]+?\\\)', stash_match, text)        # \( ... \) (markdown would eat the backslashes)
     text = re.sub(r'\$[^$\n]+?\$', stash_match, text)
 
     md = MarkdownIt("commonmark", {"html": True}).enable("table")

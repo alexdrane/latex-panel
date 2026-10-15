@@ -15,6 +15,7 @@
 #   panel.sh watch    - stream user actions, one line each; run it under the Monitor tool
 #   panel.sh events   - print unread actions (catch-up when no watch was running)
 #   panel.sh wait [--id ID] [--timeout S]  - block until the user acts (on block ID)
+#   panel.sh show SEQ                      - one event in full (watch lines are shortened)
 #   panel.sh changed OLD.pdf NEW.pdf       - which pages differ visually
 #
 #   Claude -> panel (live updates, no new history entry):
@@ -94,7 +95,8 @@ case "${1:-ensure}" in
   write)
     ensure
     tmp=$(mktemp); cat > "$tmp"
-    python3 "$RENDERER" --check < "$tmp" || true   # lint: missing files, bad blocks, dup ids
+    rc=0; python3 "$RENDERER" --check < "$tmp" || rc=$?   # lint: missing files, bad blocks, dup ids
+    (( rc > 1 )) && echo "panel lint itself FAILED (exit $rc, see above) - card written unchecked" >&2
     mv "$tmp" "$WATCH_FILE"
     echo "wrote $(wc -c < "$WATCH_FILE") bytes to $WATCH_FILE"
     ;;
@@ -102,7 +104,7 @@ case "${1:-ensure}" in
     ensure >/dev/null
     exec python3 -u "$EVENTS_PY" "$@"
     ;;
-  watch|events|wait|changed|reply|suggest|tick|flagged|filed|current)
+  watch|events|wait|show|changed|reply|suggest|tick|flagged|filed|current)
     exec python3 -u "$EVENTS_PY" "$@"
     ;;
   status)
@@ -112,7 +114,7 @@ case "${1:-ensure}" in
     pkill -f "$PAT" && echo "panel stopped" || echo "panel was not running"
     ;;
   *)
-    echo "usage: panel.sh {ensure|write|edit|current|status|stop|watch|events|wait|changed|reply|suggest|tick|flagged|filed|manim [-q l|m|h] [-s Scene]}" >&2
+    echo "usage: panel.sh {ensure|write|edit|current|status|stop|watch|events|wait|show|changed|reply|suggest|tick|flagged|filed|manim [-q l|m|h] [-s Scene]}" >&2
     exit 2
     ;;
 esac

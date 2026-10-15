@@ -6,7 +6,7 @@ Claude writes maths to `/tmp/claude_response.md`; the panel picks up changes eve
 
 ## Dependencies
 
-- Python 3.9+
+- Python 3.10+
 - GTK 3 + WebKit2GTK 4.1 (system packages)
 - `markdown-it-py` (installed automatically)
 

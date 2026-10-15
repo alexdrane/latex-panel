@@ -79,14 +79,12 @@ Do **not** use it for one-line answers, code, or shell output.
 
 ## Markdown / LaTeX syntax
 
-- Inline math: `$...$` or `\(...\)`  ·  Display: `$$...$$`
+- Inline math: `$...$` or `\(...\)`  ·  Display: `$$...$$` or `\[...\]`
 - Standard commonmark otherwise, plus GFM-style tables (`| a | b |` / `|---|---|`);
-  raw HTML passes through. Tables only started working 2026-10-08 — the renderer
-  used bare `MarkdownIt("commonmark")`, which doesn't include tables at all (that's
-  a GFM extension, not core CommonMark). Fixed by enabling `.enable("table")` +
-  `mdit_py_plugins.tables_plugin` in `latexpanel/renderer.py`. If tables ever look
-  broken again, check `pip show mdit-py-plugins` for the system python3 first —
-  that's the actual dependency gap, not a markdown syntax issue.
+  raw HTML passes through. Tables come from markdown-it's built-in `table` rule
+  (`.enable("table")` in `latexpanel/renderer.py`); `mdit-py-plugins` is optional. If a
+  table renders as text, check for a missing header separator row or a blank line
+  before the table, not the plugin.
 - **Use `\not p`, never `\slashed{p}`** - the slashed package is not in the browser renderer.
 - Keep display math in `$$...$$`, one equation per block, so history diffs stay readable.
 
@@ -174,7 +172,12 @@ review is still live. The toolbar shows **● Claude listening** while it runs, 
 `panel.sh events` at the start of any turn where the panel is in play and no watch
 was running. The Monitor can die silently, so if the light is grey, re-arm.
 `panel.sh wait --id ID --timeout 600` blocks until he acts on one block, for when you
-genuinely can't proceed without the answer.
+genuinely can't proceed without the answer **and no watch is armed**.
+
+**The watch is the only reader.** `events` and `wait` mark events as read, so while a
+watch runs they would take events away from it; both refuse (exit 2) then. Use
+`events --all` to look back without consuming. Long notes are shortened in event lines
+(`[shortened: panel.sh show SEQ]`); `show SEQ` prints that event in full.
 
 **Events are Alex's input.** Act on them like a message: "changes requested + note"
 → revise **in place** with `current` + `edit` (same block id; see "New card vs.

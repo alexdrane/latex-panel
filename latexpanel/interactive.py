@@ -210,7 +210,13 @@ def viewer(kind: str, args: str) -> str:
             return _warn(f":::{kind} {p}: use an absolute path (the panel's cwd is not yours)")
         if not os.path.exists(p):
             return _warn(f":::{kind} {p}: file not found")
-    dpi = int(opts.get("dpi", 110))
+    try:
+        dpi = int(opts.get("dpi", 110))
+        if not 30 <= dpi <= 400:
+            raise ValueError
+    except ValueError:
+        WARNINGS.append(f":::{kind} {toks[0]}: dpi={opts['dpi']!r} isn't a number in 30-400; using 110")
+        dpi = 110
     is_pdf = path.lower().endswith(".pdf")
     _auto[0] += 1
     bid = opts.get("id") or f"view-{_auto[0]}"
@@ -432,11 +438,11 @@ HEAD = r"""
     border: 1px solid #9aa9ba; background: #fff; color: #1a212a; }
   .ia-btn:hover, .ia button:hover { background: #e3ebf4; }
   .ia-btn.ok.on   { background: #2e7d4f; border-color: #2e7d4f; color: #fff; }
-  .ia-btn.mid.on  { background: #b8860b; border-color: #b8860b; color: #fff; }
+  .ia-btn.mid.on  { background: #856000; border-color: #856000; color: #fff; }
   .ia-btn.bad.on  { background: #a33a3a; border-color: #a33a3a; color: #fff; }
   .ia-err { border: 1px solid #c55; background: #fde8e8; color: #7a1d1d; padding: 8px 12px; border-radius: 6px; margin: 1em 0;
             font: 13px 'JetBrains Mono', monospace; }
-  .ia-hint { font-size: 12px; color: #6986a7; }
+  .ia-hint { font-size: 12px; color: #3f536a; }
   del { background: #f7d4d4; color: #7a1d1d; text-decoration: line-through; text-decoration-color: #a33a3a; }
   ins { background: #cfeedd; color: #14532d; text-decoration: none; }
   del + ins { margin-left: .2em; }
@@ -447,7 +453,7 @@ HEAD = r"""
   .ia-opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; padding: 12px 14px; }
   .ia-opt { border: 1px solid #c3cbd5; border-radius: 6px; background: #fff; padding: 8px 12px 10px; display: flex; flex-direction: column; }
   .ia-opt .ia-obody { flex: 1; }
-  .ia-opt .ia-olabel { font: 600 12px 'JetBrains Mono', monospace; color: #6986a7; }
+  .ia-opt .ia-olabel { font: 600 12px 'JetBrains Mono', monospace; color: #3f536a; }
   .ia-opt.sel { border-color: #2b5d8a; box-shadow: 0 0 0 2px #9cc0e4; }
   .ia-opt.picked { border-color: #2e7d4f; box-shadow: 0 0 0 2px #9fd5b3; }
   .ia-opt.picked .ia-btn { background: #2e7d4f; color: #fff; border-color: #2e7d4f; }
@@ -464,7 +470,7 @@ HEAD = r"""
   .ia-vbar .ia-sp { flex: 1; }
   .ia-vbar .ia-hint { margin-left: 8px; }
   .ia-page { padding: 4px 14px 14px; overflow-x: auto; }
-  .ia-ptitle { font: 12px 'JetBrains Mono', monospace; color: #6986a7; margin: 4px 0; }
+  .ia-ptitle { font: 12px 'JetBrains Mono', monospace; color: #3f536a; margin: 4px 0; }
   .ia-side { display: flex; gap: 10px; width: calc(100% * var(--z)); }
   .ia-side figure, .ia-single figure { margin: 0; flex: 1; position: relative; }
   .ia-single figure { width: calc(100% * var(--z)); }
@@ -486,7 +492,7 @@ HEAD = r"""
   .ia-flabel { display: none; position: absolute; top: 6px; left: 6px; z-index: 3; background: #2b5d8a; color: #fff;
                font: 12px system-ui; padding: 2px 8px; border-radius: 10px; }
   .ia-view[data-mode=flicker] .ia-flabel, .ia-view[data-mode=wipe] .ia-flabel { display: block; }
-  .ia-missing { padding: 40px; text-align: center; color: #6986a7; border: 1px dashed #9aa9ba; }
+  .ia-missing { padding: 40px; text-align: center; color: #3f536a; border: 1px dashed #9aa9ba; }
   .ia-pin { position: absolute; z-index: 4; width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 50%;
             background: #d9480f; color: #fff; font: 600 12px/22px system-ui; text-align: center; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
   .ia-pop, #ia-selpop { position: absolute; z-index: 10; width: 280px; background: #fff; border: 1px solid #9aa9ba; border-radius: 6px;
@@ -844,7 +850,7 @@ HEAD += r"""
   .ia-reply { margin: 0 14px 12px; padding: 7px 12px; background: #fff; border-left: 3px solid #2b5d8a; border-radius: 4px;
               font-size: 14px; position: relative; }
   .ia-reply b { color: #2b5d8a; margin-right: 6px; }
-  .ia-reply .x { position: absolute; right: 6px; top: 4px; cursor: pointer; color: #6986a7; }
+  .ia-reply .x { position: absolute; right: 6px; top: 4px; cursor: pointer; color: #3f536a; }
   #ia-chat { position: fixed; left: 12px; right: 12px; bottom: 54px; z-index: 49; max-height: 32vh; overflow: auto; }
   #ia-chat .ia-reply { margin: 6px 0 0; box-shadow: 0 2px 10px rgba(0,0,0,.18); }
   [data-para] { position: relative; }
@@ -870,7 +876,7 @@ HEAD += r"""
             position: relative; top: 3px; box-sizing: border-box; }
   .ia-ck[data-state=done] .ia-box { background: #2e7d4f; border-color: #2e7d4f; }
   .ia-ck[data-state=done] .ia-box::after { content: "✓"; color: #fff; font: 11px/12px system-ui; position: absolute; left: 1.5px; top: 0; }
-  .ia-ck[data-state=done] .ia-ckt { color: #6986a7; text-decoration: line-through; }
+  .ia-ck[data-state=done] .ia-ckt { color: #3f536a; text-decoration: line-through; }
   .ia-ck[data-state=doing] .ia-box { border-color: #2b5d8a; border-top-color: transparent; border-radius: 50%; animation: iaspin 1s linear infinite; }
   .ia-ck[data-state=doing] .ia-ckt { font-weight: 600; }
   @keyframes iaspin { to { transform: rotate(360deg); } }

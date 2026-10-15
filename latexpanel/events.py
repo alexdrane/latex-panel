@@ -8,6 +8,7 @@ Monitor tool on `panel.sh watch` so every click arrives as a notification.
     events.py watch                 stream new events, one readable line each (for Monitor)
     events.py events [--all]        print unread events and mark them read
     events.py wait [--id ID] [--timeout S]   block until an event (for block ID) arrives
+    events.py show SEQ                       one event in full (lines are shortened)
     events.py changed OLD.pdf NEW.pdf        pages whose rendering differs
 
 Claude -> panel (live, no new history entry):
@@ -186,12 +187,25 @@ def fmt(e: dict) -> str:
         body = f"deck finished {e.get('score')}/{e.get('n')}"
     else:
         body = json.dumps({k: v for k, v in e.items() if k not in ("seq", "ts")}, ensure_ascii=False)
+    if "…\"" in body:
+        body += f"  [shortened: panel.sh show {e.get('seq')}]"
     return head + body
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
+def _watch_running(cmd: str) -> bool:
+    if watcher_alive():
+        print(f"{cmd}: a `panel.sh watch` is running and is the only reader of new events - they arrive "
+              "on its Monitor. (`events --all` lists everything without consuming; `show SEQ` prints one in full.)",
+              file=sys.stderr)
+        return True
+    return False
+
+
 def cmd_events(a) -> int:
+    if not a.all and _watch_running("events"):
+        return 2
     evs = _read_all() if a.all else unread()
     for e in evs:
         print(fmt(e))
@@ -236,6 +250,8 @@ def cmd_watch(_a) -> int:
 
 
 def cmd_wait(a) -> int:
+    if _watch_running("wait"):
+        return 2
     deadline = time.time() + a.timeout if a.timeout else None
     while True:
         evs = unread()
@@ -249,6 +265,15 @@ def cmd_wait(a) -> int:
             print("timeout: no panel event")
             return 3
         time.sleep(0.4)
+
+
+def cmd_show(a) -> int:
+    e = _event(a.seq)
+    if e is None:
+        print(f"show: no event #{a.seq}", file=sys.stderr)
+        return 2
+    print(json.dumps(e, ensure_ascii=False, indent=1))
+    return 0
 
 
 def cmd_changed(a) -> int:
@@ -505,6 +530,7 @@ def main() -> int:
     s = sub.add_parser("events"); s.add_argument("--all", action="store_true"); s.set_defaults(f=cmd_events)
     s = sub.add_parser("watch"); s.set_defaults(f=cmd_watch)
     s = sub.add_parser("wait"); s.add_argument("--id"); s.add_argument("--timeout", type=float, default=0); s.set_defaults(f=cmd_wait)
+    s = sub.add_parser("show"); s.add_argument("seq", type=lambda v: int(v.lstrip("#"))); s.set_defaults(f=cmd_show)
     s = sub.add_parser("changed"); s.add_argument("old"); s.add_argument("new"); s.set_defaults(f=cmd_changed)
     s = sub.add_parser("reply"); s.add_argument("target"); s.add_argument("text", nargs="+"); s.set_defaults(f=cmd_reply)
     s = sub.add_parser("suggest"); s.add_argument("seq"); s.add_argument("--note"); s.set_defaults(f=cmd_suggest)
