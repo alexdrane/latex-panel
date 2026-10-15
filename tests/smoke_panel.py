@@ -201,6 +201,23 @@ def scenario(win):
     check("approved" in rn, f"edited block shows what he'd said before ({rn!r})")
     check((yield STATUS.format("plan")) == "2 / 2 done", "unchanged checklist keeps its ticks")
 
+    # popups stay inside the unobscured window; keyboard reaches rewrite + checklist
+    pop = (yield "(function(){var i=document.querySelector('.ia[data-ia-id=fig] img'), r=i.getBoundingClientRect();"
+                 "scrollBy(0, r.bottom-(innerHeight-IA.bottomReserve()-4)); r=i.getBoundingClientRect();"
+                 "i.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:r.right-3,clientY:r.bottom-3}));"
+                 "var p=document.querySelector('.ia-pop').getBoundingClientRect(), q=document.querySelector('.ia-pin.draft').getBoundingClientRect();"
+                 "return {inside: p.left>=0 && p.right<=innerWidth && p.top>=0 && p.bottom<=innerHeight-IA.bottomReserve(),"
+                 " onBody: document.querySelector('.ia-pop').parentNode===document.body, pinFree: q.bottom<=p.top||q.top>=p.bottom||q.right<=p.left}})()")
+    check(pop.get("inside") and pop.get("onBody") and pop.get("pinFree"), f"pin popup inside the visible area, pin not covered {pop}")
+    yield "document.querySelector('.ia-pop textarea').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))"
+    check((yield "document.querySelectorAll('.ia-pin.draft, .ia-pop').length") == 0, "Escape discards the draft pin")
+    kb = (yield "(function(){var el=document.querySelector('[data-para=\"0\"]'); el.focus();"
+                "el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));"
+                "var open=!!document.getElementById('ia-rwpop'), f=document.activeElement.tagName;"
+                "document.querySelector('#ia-rwpop textarea').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));"
+                "return [el.tabIndex, open, f, document.activeElement===el, document.querySelector('.ia-box').tagName]})()")
+    check(kb == [0, True, "TEXTAREA", True, "BUTTON"], f"keyboard: paragraph focusable, Enter opens rewrite, Escape returns focus, checkbox is a button {kb}")
+
     # 8. a reply addressed to an event from a deleted card is refused, not shown elsewhere
     seq = last("approve")["seq"]
     win._on_delete(None)          # deletes card 1 (shown)

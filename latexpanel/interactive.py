@@ -274,16 +274,16 @@ def viewer(kind: str, args: str) -> str:
     for p, old, new in imgs:
         pl = f'<div class="ia-ptitle">page {p}</div>' if is_pdf else ""
         if vs:
-            stack = (f'<div class="ia-stack ia-pinnable" data-which="stack">{img(old)}'
+            stack = ('<input type="range" class="ia-wipe" min="0" max="100" value="50" aria-label="Wipe position">'
+                     f'<div class="ia-stack ia-pinnable" data-which="stack">{img(old)}'
                      f'{img(new).replace("<img ", "<img class=\"b\" ", 1)}'
-                     f'<span class="ia-flabel"></span></div>'
-                     '<input type="range" class="ia-wipe" min="0" max="100" value="50">')
+                     f'<span class="ia-flabel"></span></div>')
             out.append(
                 f'<div class="ia-page" data-page="{p}">{pl}'
-                f'<div class="ia-side"><figure class="ia-pinnable" data-which="old">{img(old)}'
-                f'<figcaption>{H.escape(lab_old)}</figcaption></figure>'
-                f'<figure class="ia-pinnable" data-which="new">{img(new)}'
-                f'<figcaption>{H.escape(lab_new)}</figcaption></figure></div>'
+                f'<div class="ia-side"><figure class="ia-pinnable" data-which="old">'
+                f'<figcaption>{H.escape(lab_old)}</figcaption>{img(old)}</figure>'
+                f'<figure class="ia-pinnable" data-which="new">'
+                f'<figcaption>{H.escape(lab_new)}</figcaption>{img(new)}</figure></div>'
                 f'<div class="ia-stackwrap">{stack}</div></div>')
         else:
             out.append(f'<div class="ia-page" data-page="{p}">{pl}'
@@ -389,7 +389,7 @@ def process(text: str, md, put) -> str:
                 st = {"x": "done", "X": "done", "~": "doing"}.get(mm.group(1), "todo")
                 inner = re.sub(r"^<p>([\s\S]*)</p>\s*$", r"\1", md(mm.group(2)).strip())
                 items.append(f'<li class="ia-ck" data-n="{len(items) + 1}" data-state="{st}" '
-                             f'data-src="{H.escape(mm.group(2), True)}"><span class="ia-box" title="click to toggle"></span>'
+                             f'data-src="{H.escape(mm.group(2), True)}"><button type="button" class="ia-box" aria-label="Toggle done"></button>'
                              f'<span class="ia-ckt">{inner}</span></li>')
             return put(_open(kind, bid, title or "Checklist") + '<div class="ia-prog"><div></div></div>'
                        f'<ul class="ia-cklist">{"".join(items)}</ul>'
@@ -474,7 +474,7 @@ HEAD = r"""
   .ia-side { display: flex; gap: 10px; width: calc(100% * var(--z)); }
   .ia-side figure, .ia-single figure { margin: 0; flex: 1; position: relative; }
   .ia-single figure { width: calc(100% * var(--z)); }
-  .ia-side figcaption { font: 12px system-ui; text-align: center; color: #3f536a; }
+  .ia-side figcaption { font: 600 12px system-ui; text-align: center; color: #3f536a; margin-bottom: 4px; }
   .ia-view img { width: 100%; display: block; box-shadow: 0 1px 4px rgba(0,0,0,.25); background: #fff; cursor: crosshair; user-select: none; }
   .ia-stackwrap, .ia-wipe { display: none; }
   .ia-view:not([data-mode=side]):not([data-mode=single]) .ia-side { display: none; }
@@ -483,7 +483,7 @@ HEAD = r"""
   .ia-stack img.b { position: absolute; top: 0; left: 0; }
   .ia-view[data-mode=wipe] .ia-stack img.b { clip-path: inset(0 0 0 var(--wipe, 50%)); }
   .ia-view[data-mode=wipe] .ia-stack { box-shadow: none; }
-  .ia-view[data-mode=wipe] .ia-wipe { display: block; width: calc(100% * var(--z)); margin: 6px 0 0; }
+  .ia-view[data-mode=wipe] .ia-wipe { display: block; width: calc(100% * var(--z)); margin: 0 0 6px; }
   .ia-view[data-mode=diff] .ia-stack { filter: invert(1); }
   .ia-view[data-mode=diff] .ia-stack img { box-shadow: none; }
   .ia-view[data-mode=diff] .ia-stack img.b { mix-blend-mode: difference; }
@@ -506,9 +506,13 @@ HEAD = r"""
                  padding: 8px 12px; background: #d2dde9; border-top: 1px solid #b7c2ce; }
   #ia-composer input { flex: 1; }
   #ia-composer button { font: 13px system-ui; padding: 5px 10px; border-radius: 5px; border: 1px solid #9aa9ba; background: #fff; cursor: pointer; white-space: nowrap; }
-  #ia-toast { position: fixed; bottom: 64px; right: 16px; z-index: 60; padding: 6px 14px; border-radius: 16px; background: #2e7d4f;
+  #ia-toast { position: fixed; top: 10px; right: 16px; z-index: 60; padding: 6px 14px; border-radius: 16px; background: #2e7d4f;
               color: #fff; font: 13px system-ui; opacity: 0; transition: opacity .2s; pointer-events: none; }
   #ia-toast.show { opacity: 1; } #ia-toast.bad { background: #a33a3a; }
+  .ia button:focus-visible, .ia input:focus-visible, .ia select:focus-visible, [data-para]:focus-visible, .ia-pin:focus-visible,
+  #ia-chat button:focus-visible, #ia-rwbtn:focus-visible { outline: 2px solid #2b5d8a; outline-offset: 2px; }
+  [data-para]:focus { outline: none; }
+  [data-para]:focus-visible { outline: 2px solid #9fb6cf; }
 </style>
 <script>
 (function () {
@@ -521,6 +525,32 @@ HEAD = r"""
     t.textContent = msg; t.className = bad ? 'bad show' : 'show';
     clearTimeout(t._h); t._h = setTimeout(function () { t.className = ''; }, 1600);
   }
+  /* space at the bottom of the window taken by the message bar and Claude's reply strip */
+  IA.bottomReserve = function () {
+    var h = 0;
+    ['ia-composer', 'ia-chat'].forEach(function (id) { var e = document.getElementById(id); if (e) h += e.getBoundingClientRect().height; });
+    return h;
+  };
+  /* keep a popup fully inside the unobscured viewport: scroll the page if it can, then shift the popup */
+  IA.clampPop = function (pop, anchor) {
+    var fixed = getComputedStyle(pop).position === 'fixed';
+    var limit = function () { return window.innerHeight - IA.bottomReserve() - 8; };
+    var r = pop.getBoundingClientRect();
+    if (!fixed && r.bottom > limit()) {
+      window.scrollBy(0, Math.min(r.bottom - limit(), r.top - 8));
+      r = pop.getBoundingClientRect();
+    }
+    var dx = 0, dy = 0;
+    if (r.right > window.innerWidth - 8) dx = window.innerWidth - 8 - r.right;
+    if (r.left + dx < 8) dx = 8 - r.left;
+    if (r.bottom > limit() && anchor) {        // no room below: open above what it points at, not over it
+      var a = anchor.getBoundingClientRect();
+      if (a.top - r.height - 6 >= 8) dy = a.top - r.height - 6 - r.top;
+    }
+    if (r.bottom + dy > limit()) dy = limit() - r.bottom;
+    if (r.top + dy < 8) dy = 8 - r.top;
+    if (dx || dy) { pop.style.left = (pop.offsetLeft + dx) + 'px'; pop.style.top = (pop.offsetTop + dy) + 'px'; }
+  };
   IA._out = {}; IA._bySeq = {}; IA._cursor = 0;
   IA.send = function (ev, el) {
     ev.ts = new Date().toISOString();
@@ -639,10 +669,13 @@ HEAD = r"""
   });
 
   function placePin(pz, x, y, n) {
-    var p = document.createElement('div'); p.className = 'ia-pin'; p.textContent = n;
+    var p = document.createElement('div'); p.className = 'ia-pin'; p.textContent = n; p.tabIndex = 0;
     p.style.left = (x * 100) + '%'; p.style.top = (y * 100) + '%'; pz.appendChild(p); return p;
   }
-  function closePops() { $all(document, '.ia-pop').forEach(function (p) { p.remove(); }); }
+  function closePops() {
+    $all(document, '.ia-pop').forEach(function (p) { p.remove(); });
+    $all(document, '.ia-pin.draft').forEach(function (p) { p.remove(); });   // abandoned, never sent
+  }
 
   function openPin(pz, e) {
     closePops();
@@ -660,20 +693,24 @@ HEAD = r"""
     var label = side === 'old' ? view.dataset.labOld : side === 'new' || side === 'single' ? view.dataset.labNew : side;
     var path = side === 'old' ? view.dataset.vs : view.dataset.path;
     var n = $all(view, '.ia-pin').length + 1;
-    var pin = placePin(pz, x, y, n);
+    var pin = placePin(pz, x, y, n); pin.classList.add('draft');
     var pop = document.createElement('div'); pop.className = 'ia-pop';
-    pop.style.left = Math.min(x * 100, 60) + '%'; pop.style.top = 'calc(' + (y * 100) + '% + 16px)';
+
     pop.innerHTML = '<textarea rows="3" placeholder="Comment on this spot… (Ctrl+Enter sends)"></textarea>' +
       '<div class="ia-actions"><button class="ia-btn ok">Send</button><button class="ia-btn">Cancel</button></div>';
-    pz.appendChild(pop);
-    var ta = pop.querySelector('textarea'); ta.focus();
+    // on <body>, not inside the block: blocks clip their overflow
+    var pr = pin.getBoundingClientRect();
+    pop.style.left = (pr.left + window.scrollX - 12) + 'px'; pop.style.top = (pr.bottom + window.scrollY + 6) + 'px';
+    document.body.appendChild(pop);
+    IA.clampPop(pop, pin);
+    var ta = pop.querySelector('textarea'); ta.focus({ preventScroll: true });
     function go() {
       var c = ta.value.trim(); if (!c) { ta.focus(); return; }
       var ev = base(view);
       ev.type = 'pin'; ev.n = n; ev.page = +page.dataset.page; ev.side = side === 'single' ? 'image' : label; ev.path = path;
       ev.x = Math.round(x * 1000) / 1000; ev.y = Math.round(y * 1000) / 1000; ev.comment = c;
       ev.pin_which = pz.dataset.which;
-      if (IA.send(ev, pin)) { pin.title = c; pop.remove(); }
+      if (IA.send(ev, pin)) { pin.title = c; pin.classList.remove('draft'); pop.remove(); pin.focus(); }
     }
     var bs = pop.querySelectorAll('button');
     bs[0].onclick = function (ev) { ev.stopPropagation(); go(); };
@@ -763,6 +800,7 @@ HEAD = r"""
     pop.insertAdjacentHTML('beforeend', '<textarea rows="3" placeholder="What about this? (Ctrl+Enter sends)"></textarea>' +
       '<div class="ia-actions"><button class="ia-btn ok">Send</button><button class="ia-btn">Cancel</button></div>');
     document.body.appendChild(pop);
+    IA.clampPop(pop);
     var ta = pop.querySelector('textarea'); ta.focus();
     function go() {
       var c = ta.value.trim(); if (!c) { ta.focus(); return; }
@@ -850,9 +888,16 @@ HEAD += r"""
   .ia-reply { margin: 0 14px 12px; padding: 7px 12px; background: #fff; border-left: 3px solid #2b5d8a; border-radius: 4px;
               font-size: 14px; position: relative; }
   .ia-reply b { color: #2b5d8a; margin-right: 6px; }
-  .ia-reply .x { position: absolute; right: 6px; top: 4px; cursor: pointer; color: #3f536a; }
-  #ia-chat { position: fixed; left: 12px; right: 12px; bottom: 54px; z-index: 49; max-height: 32vh; overflow: auto; }
-  #ia-chat .ia-reply { margin: 6px 0 0; box-shadow: 0 2px 10px rgba(0,0,0,.18); }
+  .ia-reply .x { position: absolute; right: 4px; top: 3px; cursor: pointer; color: #3f536a; background: none; border: 0;
+                 font: 13px system-ui; padding: 2px 6px; border-radius: 4px; }
+  .ia-reply .x:hover { background: #e3ebf4; }
+  #ia-chat { position: fixed; left: 12px; right: 12px; bottom: 50px; z-index: 49; }
+  #ia-chat .ia-chat-list { max-height: 26vh; overflow: auto; }
+  #ia-chat.folded .ia-chat-list { display: none; }
+  #ia-chat .ia-chat-bar { text-align: right; }
+  #ia-chat .ia-chat-fold { font: 12px system-ui; padding: 2px 10px; border-radius: 10px 10px 0 0; border: 1px solid #b7c2ce;
+                           border-bottom: 0; background: #dbe4ee; color: #1a212a; cursor: pointer; }
+  #ia-chat .ia-reply { margin: 0 0 6px; padding-right: 30px; box-shadow: 0 2px 10px rgba(0,0,0,.18); }
   [data-para] { position: relative; }
   #ia-rwbtn { position: absolute; z-index: 9; display: none; width: 22px; height: 22px; border-radius: 50%; border: 1px solid #9aa9ba;
               background: #fff; color: #2b5d8a; font: 13px/20px system-ui; text-align: center; cursor: pointer; padding: 0; opacity: .75; }
@@ -866,14 +911,16 @@ HEAD += r"""
   .rw-applied { box-shadow: -10px 0 0 -7px #2e7d4f; }
   .ia.ia-collapsed > :not(.ia-head):not(.ia-reply) { display: none; }
   .ia.ia-collapsed { cursor: pointer; }
+  .ia button.ia-expand { font: 12px system-ui; padding: 1px 9px; border-radius: 10px; }
   .ia-sugg { margin-top: -0.6em; }
   /* checklist */
   .ia-prog { height: 4px; background: #d3dbe4; }
   .ia-prog div { height: 100%; width: 0; background: #2e7d4f; transition: width .4s; }
   .ia-cklist { list-style: none; padding: 8px 16px 4px; margin: 0; }
   .ia-ck { display: flex; gap: 10px; align-items: baseline; padding: 4px 6px; border-radius: 4px; }
-  .ia-box { flex: none; width: 15px; height: 15px; border: 1.5px solid #6986a7; border-radius: 4px; cursor: pointer;
-            position: relative; top: 3px; box-sizing: border-box; }
+  .ia button.ia-box { flex: none; width: 15px; height: 15px; padding: 0; background: #fff; border: 1.5px solid #3f536a;
+            border-radius: 4px; cursor: pointer; position: relative; top: 3px; box-sizing: border-box; }
+  .ia button.ia-box:hover { background: #e3ebf4; }
   .ia-ck[data-state=done] .ia-box { background: #2e7d4f; border-color: #2e7d4f; }
   .ia-ck[data-state=done] .ia-box::after { content: "✓"; color: #fff; font: 11px/12px system-ui; position: absolute; left: 1.5px; top: 0; }
   .ia-ck[data-state=done] .ia-ckt { color: #3f536a; text-decoration: line-through; }
@@ -921,6 +968,26 @@ HEAD += r"""
   };
 
   /* ── replies from Claude ───────────────────────────────── */
+  function chatStrip() {
+    var c = document.getElementById('ia-chat');
+    if (c) return c;
+    c = document.createElement('div'); c.id = 'ia-chat';
+    c.innerHTML = '<div class="ia-chat-bar"><button type="button" class="ia-chat-fold" aria-expanded="true"></button></div>' +
+                  '<div class="ia-chat-list"></div>';
+    c.querySelector('.ia-chat-fold').onclick = function () { c.classList.toggle('folded'); chatUpdate(); };
+    document.body.appendChild(c); return c;
+  }
+  function chatUpdate() {
+    var c = document.getElementById('ia-chat'); if (!c) return;
+    var n = c.querySelectorAll('.ia-chat-list .ia-reply').length, folded = c.classList.contains('folded');
+    c.style.display = n ? '' : 'none';
+    var f = c.querySelector('.ia-chat-fold');
+    f.textContent = (folded ? '▸ ' : '▾ ') + n + ' message' + (n === 1 ? '' : 's') + ' from Claude' + (folded ? '' : ' · hide');
+    f.setAttribute('aria-expanded', String(!folded));
+    // keep the end of the page scrollable above the bar + strip
+    document.body.style.setProperty('padding-bottom', (IA.bottomReserve() + 20) + 'px', 'important');
+  }
+  IA.chatUpdate = chatUpdate;
   IA.reply = function (id, text, ts, quiet) {
     var d = document.createElement('div'); d.className = 'ia-reply';
     d.innerHTML = '<b>Claude · ' + hhmm(ts) + '</b>';
@@ -928,10 +995,15 @@ HEAD += r"""
     var block = id ? blockById(id) : null;
     if (block) { block.appendChild(d); }
     else {
-      var c = document.getElementById('ia-chat');
-      if (!c) { c = document.createElement('div'); c.id = 'ia-chat'; document.body.appendChild(c); }
-      var x = document.createElement('span'); x.className = 'x'; x.textContent = '✕';
-      x.onclick = function () { d.remove(); }; d.appendChild(x); c.appendChild(d);
+      var c = chatStrip();
+      var x = document.createElement('button'); x.type = 'button'; x.className = 'x'; x.textContent = '✕';
+      x.setAttribute('aria-label', 'Dismiss reply');
+      x.onclick = function () {
+        var next = d.nextElementSibling || d.previousElementSibling;
+        d.remove(); chatUpdate(); (next && next.querySelector('.x') || document.querySelector('#ia-composer input')).focus();
+      };
+      d.appendChild(x); c.querySelector('.ia-chat-list').appendChild(d);
+      c.classList.remove('folded'); chatUpdate();
     }
     typeset(d);
     if (!quiet) { IA.toast('Claude: ' + text.slice(0, 70)); if (block) { block.classList.remove('flash'); void block.offsetWidth; block.classList.add('flash'); } }
@@ -962,7 +1034,7 @@ HEAD += r"""
   function rwButton() {
     var b = document.getElementById('ia-rwbtn');
     if (!b) {
-      b = document.createElement('button'); b.id = 'ia-rwbtn'; b.textContent = '✎'; b.title = 'Ask Claude to rewrite this';
+      b = document.createElement('button'); b.id = 'ia-rwbtn'; b.textContent = '✎'; b.title = 'Ask Claude to rewrite this'; b.setAttribute('aria-label', 'Ask Claude to rewrite this paragraph');
       b.onclick = function (e) { e.stopPropagation(); openRewrite(rwTarget); };
       b.onmouseenter = function () { clearTimeout(rwHide); };
       document.body.appendChild(b);
@@ -980,10 +1052,23 @@ HEAD += r"""
       b.style.display = 'block';
     } else { clearTimeout(rwHide); rwHide = setTimeout(function () { b.style.display = 'none'; }, 700); }
   });
+  document.addEventListener('focusin', function (e) {
+    var el = e.target.closest && e.target.closest('[data-para]'); if (!el || el !== e.target) return;
+    var b = rwButton(), r = el.getBoundingClientRect();
+    clearTimeout(rwHide); rwTarget = el;
+    b.style.left = (r.left + window.scrollX - 26) + 'px'; b.style.top = (r.top + window.scrollY + 1) + 'px';
+    b.style.display = 'block';
+  });
+  document.addEventListener('keydown', function (e) {   // Enter on a focused paragraph = ask for a rewrite
+    if (e.key === 'Enter' && !e.ctrlKey && !e.altKey && !window._deckMode && e.target.dataset && e.target.dataset.para !== undefined) {
+      e.preventDefault(); e.stopPropagation(); openRewrite(e.target);
+    }
+  }, true);
   var CHIPS = ['Shorter', 'Clearer', 'More rigorous', 'Simpler', 'More formal', 'Fix errors'];
   function openRewrite(el) {
     if (!el) return;
     var old = document.getElementById('ia-rwpop'); if (old) old.remove();
+    var back = document.activeElement && document.activeElement.id === 'ia-rwbtn' ? el : (document.activeElement || el);
     var r = el.getBoundingClientRect();
     var pop = document.createElement('div'); pop.id = 'ia-rwpop';
     pop.style.left = (Math.max(8, r.left + window.scrollX)) + 'px'; pop.style.top = (r.bottom + window.scrollY + 4) + 'px';
@@ -991,7 +1076,9 @@ HEAD += r"""
       '<textarea rows="2" placeholder="How should it change? (Ctrl+Enter sends)"></textarea>' +
       '<div class="ia-actions"><button class="ia-btn ok">Ask for rewrite</button><button class="ia-btn">Cancel</button></div>';
     document.body.appendChild(pop);
-    var ta = pop.querySelector('textarea'); ta.focus();
+    IA.clampPop(pop, el);
+    var ta = pop.querySelector('textarea'); ta.focus({ preventScroll: true });
+    function close() { pop.remove(); if (back && back.focus) back.focus({ preventScroll: true }); }
     IA.all(pop, '.chips button').forEach(function (c) {
       c.onclick = function () { ta.value = (ta.value ? ta.value.replace(/\s*$/, '; ') : '') + c.textContent.toLowerCase(); ta.focus(); };
     });
@@ -999,14 +1086,14 @@ HEAD += r"""
       var ins = ta.value.trim(); if (!ins) { ta.focus(); return; }
       var ev = { type: 'rewrite', para: +el.dataset.para, text: IA.fragText(el).trim(), instruction: ins,
                  context: el.matches('h1,h2,h3,h4') ? el.textContent.trim() : IA.headingBefore(el) };
-      if (IA.send(ev, null)) { el.classList.add('rw-pending'); el.title = 'Waiting for Claude’s rewrite'; pop.remove(); }
+      if (IA.send(ev, null)) { el.classList.add('rw-pending'); el.title = 'Waiting for Claude’s rewrite'; close(); }
     }
     var bs = pop.querySelectorAll('.ia-actions button');
-    bs[0].onclick = go; bs[1].onclick = function () { pop.remove(); };
-    ta.addEventListener('keydown', function (e) {
+    bs[0].onclick = go; bs[1].onclick = close;
+    pop.addEventListener('keydown', function (e) {
       e.stopPropagation();
       if (e.key === 'Enter' && e.ctrlKey) go();
-      if (e.key === 'Escape') pop.remove();
+      if (e.key === 'Escape') close();
     });
   }
   IA.suggest = function (para, html, quiet, replaced) {
@@ -1024,6 +1111,13 @@ HEAD += r"""
     if (!quiet) { w.scrollIntoView({ block: 'nearest' }); IA.toast('Claude suggested a rewrite'); }
     return block;
   };
+  function collapse(block, on) {
+    block.classList.toggle('ia-collapsed', on);
+    var head = IA.own(block, '.ia-head'), b = head && head.querySelector('.ia-expand');
+    if (!b && head) { b = document.createElement('button'); b.type = 'button'; b.className = 'ia-expand'; head.appendChild(b); }
+    if (b) { b.textContent = on ? 'Show ▸' : 'Hide ▾'; b.setAttribute('aria-expanded', String(!on)); }
+  }
+  IA.collapse = collapse;
   IA.applyRewrite = function (block, decision) {
     var el = document.querySelector('[data-para="' + block.dataset.rw + '"]'); if (!el) return;
     if (el._orig === undefined) el._orig = el.innerHTML;
@@ -1031,10 +1125,10 @@ HEAD += r"""
       var pane = block.querySelectorAll('.ia-pane')[1];
       var ps = pane.querySelectorAll(':scope > p');
       el.innerHTML = ps.length === 1 ? ps[0].innerHTML : pane.innerHTML;
-      el.classList.add('rw-applied'); block.classList.add('ia-collapsed');
+      el.classList.add('rw-applied'); collapse(block, true);
     } else {
       el.innerHTML = el._orig; el.classList.remove('rw-applied');
-      if (decision === 'reject') block.classList.add('ia-collapsed');
+      if (decision === 'reject') collapse(block, true);
     }
   };
 
@@ -1067,8 +1161,10 @@ HEAD += r"""
                 text: li.dataset.src, state: st }, block);
       return;
     }
+    var exp = t.closest('.ia-expand');
+    if (exp) { var bl = exp.closest('.ia'); collapse(bl, !bl.classList.contains('ia-collapsed')); return; }
     var col = t.closest('.ia.ia-collapsed');
-    if (col && t.closest('.ia-head')) col.classList.remove('ia-collapsed');
+    if (col && t.closest('.ia-head')) collapse(col, false);
   });
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Enter' || !e.target.closest || !e.target.closest('.ia-ckadd')) return;
@@ -1079,7 +1175,7 @@ HEAD += r"""
 
   /* ── restore + init ────────────────────────────────────── */
   document.addEventListener('DOMContentLoaded', function () {
-    rewritables().forEach(function (el, i) { el.dataset.para = i; });
+    rewritables().forEach(function (el, i) { el.dataset.para = i; el.tabIndex = 0; });
     var saved = window._iaSaved || {};
     Object.keys(saved.suggestions || {}).forEach(function (para) {
       var sg = saved.suggestions[para], block = IA.suggest(para, sg.html, true);

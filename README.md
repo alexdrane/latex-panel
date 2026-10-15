@@ -67,14 +67,16 @@ Interactive blocks (`:::approve`, `:::diff`, `:::choice`, `:::params`, `:::ask`)
 PDF/image viewer with before/after compare modes and click-to-pin comments
 (`:::pdf`, `:::img`), select-text-to-comment, and a message bar all append events to
 `~/.local/share/latex-panel/events.jsonl`. `scripts/panel.sh watch` streams them
-(run it under Claude Code's Monitor tool); `events` / `wait` catch up or block.
-Syntax is in [`SKILL.md`](SKILL.md). PDF pages are rasterised with `pdftoppm`
+(run it under Claude Code's Monitor tool); `events` / `wait` catch up or block when no
+watch is running. Hover a paragraph and click ✎ (or Tab to it and press Enter) to ask
+for a rewrite; replies from Claude collect in a strip above the message bar that folds
+away. Syntax is in [`SKILL.md`](SKILL.md). PDF pages are rasterised with `pdftoppm`
 (poppler-utils).
 
 ## LaTeX notes
 
 - Inline math: `$...$` or `\(...\)`
-- Display math: `$$...$$`
+- Display math: `$$...$$` or `\[...\]`
 - Use `\not p` not `\slashed{p}` — the slashed package is not supported in the browser renderer
 
 ## How it works
