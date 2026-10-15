@@ -59,6 +59,17 @@ The panel watches `/tmp/claude_response.md`. Anything written there is rendered 
 | ◀ / ▶ | Navigate session history |
 | ★ Flag | Save response to `~/.local/share/latex-panel/flagged/` |
 | ✕ Delete | Remove entry from history |
+| ● / ○ | Whether a Claude session is listening for clicks (`panel.sh watch`) |
+
+### Talking back to Claude
+
+Interactive blocks (`:::approve`, `:::diff`, `:::choice`, `:::params`, `:::ask`), a
+PDF/image viewer with before/after compare modes and click-to-pin comments
+(`:::pdf`, `:::img`), select-text-to-comment, and a message bar all append events to
+`~/.local/share/latex-panel/events.jsonl`. `scripts/panel.sh watch` streams them
+(run it under Claude Code's Monitor tool); `events` / `wait` catch up or block.
+Syntax is in [`SKILL.md`](SKILL.md). PDF pages are rasterised with `pdftoppm`
+(poppler-utils).
 
 ## LaTeX notes
 

@@ -2,12 +2,26 @@
 # Idempotent control script for the latex-panel window, driven by the Claude skill.
 #
 #   panel.sh ensure   - launch the panel if it is not already running (default)
-#   panel.sh write     - read markdown from stdin, render it in the panel (implies ensure)
+#   panel.sh write     - read markdown from stdin, render it as a NEW card (implies ensure)
+#   panel.sh current [--latest|--entry N]  - copy a card's markdown to edit.md (prints the path)
+#   panel.sh edit [--latest|--shown|--entry N] [FILE] - replace a card IN PLACE from stdin/FILE/edit.md
 #   panel.sh status   - report whether the panel is running
 #   panel.sh stop     - close the panel
 #   panel.sh manim [-q l|m|h] [-s Scene]  - OPTIONAL: Manim scene .py on stdin -> render ->
 #                       prints a ':::video <path>' line to put in the markdown you `write`.
 #                       Failed renders print the error and exit 1; nothing is shown.
+#
+#   Panel -> Claude (interactive blocks, pins, selection comments, the message bar):
+#   panel.sh watch    - stream user actions, one line each; run it under the Monitor tool
+#   panel.sh events   - print unread actions (catch-up when no watch was running)
+#   panel.sh wait [--id ID] [--timeout S]  - block until the user acts (on block ID)
+#   panel.sh changed OLD.pdf NEW.pdf       - which pages differ visually
+#
+#   Claude -> panel (live updates, no new history entry):
+#   panel.sh reply ID|'#SEQ' TEXT...       - show a reply under a block / in the chat strip
+#   panel.sh suggest SEQ [--note N] < new  - in-place rewrite for a `rewrite` event
+#   panel.sh tick ID ITEM [todo|doing|done]- update a :::checklist item
+#   panel.sh flagged [--all] / filed FILE  - flagged responses awaiting / done filing to notes
 #
 # The panel is a GTK process; it must be running for anything to be visible.
 # This script is the only thing the skill calls.
@@ -16,6 +30,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RENDERER="$REPO/latexpanel/renderer.py"
+EVENTS_PY="$REPO/latexpanel/events.py"
 WATCH_FILE="/tmp/claude_response.md"
 PAT="latexpanel/renderer.py"
 
@@ -78,8 +93,17 @@ case "${1:-ensure}" in
     ;;
   write)
     ensure
-    cat > "$WATCH_FILE"
+    tmp=$(mktemp); cat > "$tmp"
+    python3 "$RENDERER" --check < "$tmp" || true   # lint: missing files, bad blocks, dup ids
+    mv "$tmp" "$WATCH_FILE"
     echo "wrote $(wc -c < "$WATCH_FILE") bytes to $WATCH_FILE"
+    ;;
+  edit)
+    ensure >/dev/null
+    exec python3 -u "$EVENTS_PY" "$@"
+    ;;
+  watch|events|wait|changed|reply|suggest|tick|flagged|filed|current)
+    exec python3 -u "$EVENTS_PY" "$@"
     ;;
   status)
     if running; then echo "running (pid $(pgrep -f "$PAT" | head -1))"; else echo "not running"; fi
@@ -88,7 +112,7 @@ case "${1:-ensure}" in
     pkill -f "$PAT" && echo "panel stopped" || echo "panel was not running"
     ;;
   *)
-    echo "usage: panel.sh {ensure|write|status|stop|manim [-q l|m|h] [-s Scene]}" >&2
+    echo "usage: panel.sh {ensure|write|edit|current|status|stop|watch|events|wait|changed|reply|suggest|tick|flagged|filed|manim [-q l|m|h] [-s Scene]}" >&2
     exit 2
     ;;
 esac

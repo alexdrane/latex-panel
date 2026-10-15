@@ -1,6 +1,6 @@
 ---
 name: latex-panel
-description: Render markdown + LaTeX (and interactive MCQ quizzes, collapsible spoilers, TikZ/Feynman diagrams) in a floating always-on-top window on the user's desktop, updated live as the session goes. This is the default surface for any maths/physics working, derivations, revision, or quizzing - write there without being asked. The window is a GTK process the skill auto-launches; the skill also carries the syntax reference and renderer gotchas. Use whenever the user wants to see equations, work a derivation, revise a topic, or be quizzed. Optionally embeds Manim animations when something genuinely needs to move.
+description: Render markdown + LaTeX (and interactive MCQ quizzes, collapsible spoilers, TikZ/Feynman diagrams) in a floating always-on-top window on the user's desktop, updated live as the session goes. This is the default surface for any maths/physics working, derivations, revision, or quizzing - write there without being asked. The window is a GTK process the skill auto-launches; the skill also carries the syntax reference and renderer gotchas. Use whenever the user wants to see equations, work a derivation, revise a topic, or be quizzed. Optionally embeds Manim animations when something genuinely needs to move. It is also two-way: approve/diff/choice/params/checklist blocks, before-vs-after PDF/image previews with click-to-pin comments, and paragraph rewrite requests send Alex's clicks back to the session. Use it whenever he needs to sign off on wording or a visual change (e.g. previewing an edited PDF), pick between variants, or tune a figure.
 ---
 
 # latex-panel
@@ -31,6 +31,31 @@ Write the **whole** response for that turn as one document - it replaces, not
 appends. Prose the user needs stays in the terminal too; the panel is for the
 maths-heavy artefact.
 
+### New card vs. editing the card in place
+
+`write` always adds a **new card** to history. When the next panel is the *same
+artefact revised* (fix a typo, apply his requested changes, swap in a recompiled
+preview, add a step to a derivation he's reading), **edit it in place** instead:
+
+```bash
+$S current                 # copies the card he's looking at to ~/.local/share/latex-panel/edit.md
+# Read that file, make targeted changes with the Edit tool (no need to regenerate it all)
+$S edit                    # replaces that same card; keeps his scroll position
+printf '%s' "$MD" | $S edit --latest   # or pipe a whole new version (--latest / --shown / --entry N)
+```
+
+- Blocks whose source is unchanged keep their state: decisions, pins, ticks and replies.
+- A block whose content you changed **keeps its id** and resets to "revised · awaiting you",
+  with a note of what he'd said before ("requested changes — 'shorter'"). This is the
+  normal way to answer "Request changes": edit the card, don't post a `-v2` block on a new
+  card. Pins on a recompiled PDF stay as faded "before revision" markers, so he can check
+  the spots were fixed.
+- Rewrite suggestions he hasn't decided on are dropped by an edit, because paragraph
+  positions may move. Bake approved rewrites into the text when you edit.
+- `current` without flags takes the card **on screen**. If he's browsing history and says
+  "change this", that's the right one. Use a new card when it's a new step or topic.
+  The toolbar shows "edited HH:MM" on edited cards.
+
 ## When to use it
 
 - Any derivation, proof, or multi-line algebra.
@@ -43,7 +68,13 @@ Do **not** use it for one-line answers, code, or shell output.
 ## Markdown / LaTeX syntax
 
 - Inline math: `$...$` or `\(...\)`  ·  Display: `$$...$$`
-- Standard commonmark otherwise; raw HTML passes through.
+- Standard commonmark otherwise, plus GFM-style tables (`| a | b |` / `|---|---|`);
+  raw HTML passes through. Tables only started working 2026-10-08 — the renderer
+  used bare `MarkdownIt("commonmark")`, which doesn't include tables at all (that's
+  a GFM extension, not core CommonMark). Fixed by enabling `.enable("table")` +
+  `mdit_py_plugins.tables_plugin` in `latexpanel/renderer.py`. If tables ever look
+  broken again, check `pip show mdit-py-plugins` for the system python3 first —
+  that's the actual dependency gap, not a markdown syntax issue.
 - **Use `\not p`, never `\slashed{p}`** - the slashed package is not in the browser renderer.
 - Keep display math in `$$...$$`, one equation per block, so history diffs stay readable.
 
@@ -117,12 +148,156 @@ printf '%s\n\n%s\n' "Text and maths as usual" "$LINE" | $S write
   flagged notes keep working. The running panel must be restarted once
   (`panel.sh stop; panel.sh ensure`) to pick up `:::video` support.
 
+## Talking back: interactive blocks → Claude
+
+The panel is two-way. Buttons, pins, text-selection comments and the message bar at
+the bottom append events to `~/.local/share/latex-panel/events.jsonl`; you receive
+them as readable one-liners.
+
+**Listening.** Whenever you write a panel that asks Alex for something (any block
+below), arm one Monitor per session: command `~/.claude/skills/latex-panel/scripts/panel.sh watch`,
+description `latex-panel clicks`, `timeout_ms` 1800000; re-arm on expiry while the
+review is still live. The toolbar shows **● Claude listening** while it runs, and
+**○ not listening** otherwise. Clicks made while nobody listens are queued. Run
+`panel.sh events` at the start of any turn where the panel is in play and no watch
+was running. The Monitor can die silently, so if the light is grey, re-arm.
+`panel.sh wait --id ID --timeout 600` blocks until he acts on one block, for when you
+genuinely can't proceed without the answer.
+
+**Events are Alex's input.** Act on them like a message: "changes requested + note"
+→ revise **in place** with `current` + `edit` (same block id; see "New card vs.
+editing the card in place"). `OLDER response` in an event means he
+clicked on a previous history entry, so answer about that one. Never treat a
+missing click as approval.
+
+Fenced blocks (close with a bare `:::`; don't nest fenced blocks, but single-line
+`:::pdf` / `:::img` / `:::video` lines inside them are fine):
+
+```
+:::approve sec4 Sign off §4 wording        ← id, then title
+Any markdown/maths/:::pdf being signed off.
+:::                                         → Approve / Request changes (note required) / Reject
+
+:::diff cap3 Figure 3 caption               ← add `tex` after the id for raw-LaTeX source diffs
+Old wording...
+===
+New wording...
+:::                                         → word-level diff (Changes / New / Old tabs) + same buttons
+
+:::choice title-pick Which title?           ← `multi` after the id → pick several + Send
+Optional preamble.
+@@ A
+First option (markdown, maths, images)
+@@ B
+Second option
+:::                                         → Pick X, or "None of these" + comment
+
+:::params fig3 Figure 3 styling
+# comment lines become hints
+fontsize = 11 [8, 16, 0.5]                  ← slider [min, max, step]
+cmap = viridis {viridis, magma, cividis}    ← dropdown
+show_truth = true                           ← checkbox
+xlabel = "$\Delta t$ [days]"                ← text
+:::                                         → "Send values" emits all values
+
+:::checklist plan Revision plan
+- [x] Fix caption of Fig. 3
+- [~] Recompile with new colormap           ← [~] = in progress (spinner)
+- [ ] Update §4 wording
+:::                                         → live progress list; you tick it, he can too
+```
+
+Single-line:
+
+```
+:::ask q1 What dpi does the journal want?   → free-text answer box
+:::pdf /abs/new.pdf vs=/abs/old.pdf [pages=changed|all|1,3-4] [dpi=110] [id=fig3] [labels="Current,Proposed"] [caption="..."]
+:::img /abs/new.png [vs=/abs/old.png] ...   (same viewer for png/jpg/svg)
+```
+
+The viewer rasterises PDF pages (cached; the cache key includes mtime, so
+recompiling to the same path refreshes them). With `vs=` it has **Side by side /
+Wipe / Difference / Flicker** modes. Difference blanks everything unchanged, which
+is the fastest way to see what a recompile moved. `pages` defaults to `changed`
+when `vs=` is given (`panel.sh changed OLD NEW` prints that list), otherwise to
+`all`; it is capped at 30 pages. **Clicking a page drops a numbered pin and asks for
+a comment**. The event gives page, which version, and x/y as fractions from the
+top-left, so you can find the spot in the rendered PNG (`~/.local/share/latex-panel/pdfcache/`)
+or the source. Paths must be absolute.
+
+Always on, no syntax needed: select any text → **💬 Ask about this** (rendered maths
+is sent back as its TeX source), and the bottom bar takes free messages plus 👍 / ❓ / →
+quick replies. MCQ answers and deck scores arrive as events too. Hovering any plain
+paragraph, heading or list item shows a **✎** in the margin. It asks for a rewrite
+(chips: shorter / clearer / more rigorous / ...) and gives you a `rewrite` event
+with the paragraph's text (maths as TeX) and his instruction.
+
+### Claude → panel (live, without writing a new history entry)
+
+```bash
+S=~/.claude/skills/latex-panel/scripts/panel.sh
+$S reply sec4 "Got it - recompiling with the new wording"   # under block sec4
+$S reply '#12' "Filed under GR/geodesics.md"                # answer event #12 (block, or chat strip)
+$S suggest 12 --note "cut the hedge" <<'MD'                 # answer rewrite event #12 in place
+Repartitioning cuts $\mathrm{Var}[\ln Z]$ by $\sim 3.4\times$.
+MD
+$S tick plan 2 doing        # checklist item by number or text substring: todo | doing | done
+$S tick plan "§4" done
+```
+
+- **Every event you act on gets a receipt automatically.** Reading it (via `watch`,
+  `events` or `wait`) flips the block's badge to "seen ✓". Use `reply` when he'd
+  otherwise wonder what you're doing: you're starting a long recompile, you disagree,
+  or you need a clarification. Don't reply to every click.
+- **`rewrite` → `suggest`**: write only the replacement text on stdin (markdown + maths,
+  same voice). The panel inserts a diff right under the paragraph, and Approve swaps
+  the paragraph in place. If the paragraph comes from a real source (paper, notes),
+  approval is your cue to apply the same edit there. `suggest` only works for events
+  from the running panel session.
+- **Checklists**: when you're working through a multi-step job he's watching, write the
+  plan as a `:::checklist` once, then `tick` items as you go instead of rewriting the
+  panel. His ticks arrive as `check` events and his additions as `check_add`. Fold
+  them into the plan.
+- The toolbar's **⏳ N awaiting you** counts approve/diff/choice/ask blocks (and
+  rewrite suggestions) with no decision yet. It ignores blocks superseded by a later
+  entry that reuses the id or adds a `-vN` suffix (`cap3` → `cap3-v2`). Clicking it
+  jumps to the latest one. Undecided blocks also show an "awaiting you" badge.
+
+### PDF change preview (the main use)
+
+1. Compile the candidate into a **separate** file (e.g. `/tmp/preview/main.pdf` via
+   `latexmk -outdir`). Never overwrite Alex's PDF or source to preview.
+2. Write a panel with `:::pdf /tmp/preview/main.pdf vs=/path/to/current/main.pdf id=...`,
+   plus `:::diff` for the wording and/or `:::approve` (or `:::choice` for variants).
+3. Approve → apply that exact change to the source. Changes/pins → revise, recompile
+   the preview, write v2. Approve is his sign-off for that one edit, nothing wider.
+
+`panel.sh write` lints the document first and prints `panel warning: ...` for missing
+files, relative paths, malformed blocks, duplicate ids or unclosed `:::` directives.
+Fix them before telling Alex to look. After a code update to the renderer, the
+running panel needs `panel.sh stop; panel.sh ensure` (this clears its history).
+
 ## Flagging for notes
 
 The window's **★ Flag** button saves the current response to
 `~/.local/share/latex-panel/flagged/<timestamp>.md` for later consolidation into
-Obsidian notes. When the user says "flag that" they may click it themselves, or
-ask you to - a flagged file is just the raw markdown you wrote.
+Obsidian notes, and emits a `flag` event (just note it, no action needed). When the
+user says "flag that" they may click it themselves, or ask you to - a flagged file is
+just the raw markdown you wrote.
+
+**📥 Notes** saves it the same way and emits `to_notes`, which means "file this now":
+
+1. Read the file and pick the vault note: `~/Academic/PartIII/Notes/<Course>/<slug>.md`
+   (courses QFT, GR, AstroStats, Cosmo; one file per topic; sections `## Key equations`,
+   `## Definitions`, `## Derivation sketches`, `## Notation notes`). Append the
+   condensed content under the right section as `$$...$$` display maths. Don't paste
+   the whole panel: drop MCQs, interactive blocks and chit-chat. If no topic fits,
+   ask rather than invent a file.
+2. `panel.sh filed <file>` (moves it to `flagged/filed/`), then
+   `panel.sh reply '#<seq>' "Filed → GR/geodesics.md (Key equations)"`.
+
+`panel.sh flagged` lists flagged responses not yet filed (`--all` includes filed ones).
+When he asks to "consolidate my flags", work through that list the same way.
 
 ## If it won't start
 
