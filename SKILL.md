@@ -45,6 +45,13 @@ printf '%s' "$MD" | $S edit --latest   # or pipe a whole new version (--latest /
 $S current --event 12      # check out the card that panel event #12 came from (answering a click)
 ```
 
+- **Never edit a card Alex is typing in.** The page saves every keystroke of unsent text
+  (`drafts.json`). `edit` on a card with unsent text is **refused** (exit 3, `REFUSED - Alex has
+  unsent text`); the renderer also refuses it (a `panel_error` on the watch stream). Then post a
+  **new card** with `write` instead, or wait for his click. `--force` exists but needs his say-so.
+  Unsent text is restored after any re-render (edit, refresh, restart), so nothing is lost, but
+  re-rendering under him is still disruptive: before correcting a card he may be reading, prefer a
+  new card or a `reply`.
 - **Every card has a revision number** (`r2`, `r3`… in event lines once it's been
   revised). Clicks carry the card and revision they were made on. An `edit` from a
   checkout is refused if the card changed since (`card changed since checkout`): run
@@ -176,8 +183,10 @@ genuinely can't proceed without the answer **and no watch is armed**.
 
 **The watch is the only reader.** `events` and `wait` mark events as read, so while a
 watch runs they would take events away from it; both refuse (exit 2) then. Use
-`events --all` to look back without consuming. Long notes are shortened in event lines
-(`[shortened: panel.sh show SEQ]`); `show SEQ` prints that event in full.
+`events --all` to look back without consuming. Notes and edited proposals are printed in
+full; other long fields (answers, pin comments) may be shortened with a
+`[shortened: panel.sh show SEQ]` hint. `show SEQ` / `show-event SEQ` prints one event's full
+JSON; `show-event SEQ --field edited` prints just that field raw (newlines and backslashes as typed).
 
 **Events are Alex's input.** Act on them like a message: "changes requested + note"
 → revise **in place** with `current` + `edit` (same block id; see "New card vs.
@@ -253,6 +262,9 @@ with the paragraph's text (maths as TeX) and his instruction.
 S=~/.claude/skills/latex-panel/scripts/panel.sh
 $S reply sec4 "Got it - recompiling with the new wording"   # under block sec4
 $S reply '#12' "Filed under GR/geodesics.md"                # answer event #12 (block, or chat strip)
+$S alt 31 --note "'tiny' is vague" <<'MD'                   # opinion + alternative wording beside his edit (diff_edit #31)
+Option B: $\Delta t$ is negligible.
+MD
 $S suggest 12 --note "cut the hedge" <<'MD'                 # answer rewrite event #12 in place
 Repartitioning cuts $\mathrm{Var}[\ln Z]$ by $\sim 3.4\times$.
 MD
@@ -274,6 +286,28 @@ $S tick plan "§4" done
   one paragraph of the card's markdown. Then edit the card with `current --event SEQ` /
   `edit`. A second `suggest` for the same request replaces the first as a fresh,
   undecided proposal. Resending identical text does nothing.
+- **Editable proposals (`diff_edit`) - no new syntax, automatic on every `:::diff` and every
+  `:::choice` option.** The "New" text of a diff (tab **New ✎**) and each choice option
+  (**✎ Edit wording**) is a plain-text editor: `\citet{X}` and `$\Delta t$` stay exactly as typed, and
+  the word diff against the original updates as he types. Two steps, shown as badges
+  `edited → sent for review → Claude replied → approve my version`:
+  1. He presses **Send my version for review**. You get
+     `diff_edit` with `id`, `card`, `rev`, `original` (your proposal), `edited` (his FULL text),
+     optionally `option` (choice label) and `note`. The watch line carries `edited` complete on one
+     line, JSON-escaped (`\n` = newline, `\\` = backslash); `show-event SEQ --field edited` gives it raw.
+  2. **You must reply with an opinion on his edit before he can approve it**: `panel.sh reply '#SEQ' "…"`
+     (opinion only) or `panel.sh alt SEQ --note "…" <<'MD' … MD` (opinion plus alternative wording,
+     shown as a second diff beside his version with a "Use Claude's wording" button). Be honest
+     and specific: does it keep the claim, is it accurate against the paper, any cite/label/
+     maths slip? Don't just agree. Never approve for him.
+  Only after your reply does **Approve my version** (diff) / **Pick** (choice) unlock; the panel refuses
+  an approve of edited text that was not sent and answered. The approval is a normal `diff` / `choice`
+  event with extra `edited_text` / `proposal_original` (or `picked_edited` + `picked_text` = his text), and
+  the watch line says "the author's OWN edited version". **The card's markdown still holds your original
+  proposal**, so apply the `edited_text` from the event (or `state.json` → `entries[].edits[ID].text`,
+  `approved: true`), not the markdown's `new` part. `edit` of a card is refused while he has
+  unsent edited text (same guard as the note box); a card edit that changes a block's proposal resets his
+  edit with a note of what he had.
 - If the panel can't do something you asked (stale edit, reply to a deleted card's
   event, late suggestion), a `panel #N NOT DONE: …` line arrives on the watch stream.
 - **Checklists**: when you're working through a multi-step job he's watching, write the
@@ -298,6 +332,26 @@ $S tick plan "§4" done
 files, relative paths, malformed blocks, duplicate ids or unclosed `:::` directives.
 Fix them before telling Alex to look. After a code update to the renderer, the
 running panel needs `panel.sh stop; panel.sh ensure` (this clears its history).
+
+## Optional: remote view (tablet / phone browser)
+
+Off by default; switch it on only when Alex asks (e.g. he's on the treadmill tablet). It mirrors
+the running panel - same history, same cards, same `events.jsonl` - so everything else in this
+skill is unchanged: `write`, `edit`, `watch`, `reply` all work and reach both screens.
+
+```bash
+$S remote on            # prints the URL (with access token) to open on the tablet; stays on across panel restarts
+$S remote on --bind tailscale   # or: lan (default), all, or an IP;  --port N (default 8765)
+$S remote status        # serving? how many browsers connected
+$S remote url           # the URL again
+$S remote off
+```
+
+- Clicks from either screen are the same events; the other screen re-renders so it doesn't
+  still offer a decision already made. Navigation (◀ ▶) is shared.
+- For tablet use, favour tap-only blocks: `:::approve`, `:::choice`, `:::checklist`, MCQs. Typing
+  and select-text-to-comment are awkward on a touch screen; keep notes optional.
+- Plain HTTP + a token: fine on the home network, don't leave it on over untrusted Wi-Fi.
 
 ## Flagging for notes
 

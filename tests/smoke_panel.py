@@ -101,7 +101,7 @@ def scenario(win):
     yield 1200
     idA = (yield "(document.querySelector('.ia-sugg .ia')||{dataset:{}}).dataset.iaId")
     check(idA == f"rw-{rw['seq']}-1", f"proposal A shown as {idA}")
-    yield f"(function(){{var b=document.querySelector('.ia[data-ia-id=\"{idA}\"]'); b.querySelector('textarea').value='tighter'; b.querySelector('[data-act=approve]').click()}})()"
+    yield f"(function(){{var b=document.querySelector('.ia[data-ia-id=\"{idA}\"]'); b.querySelector('.ia-foot textarea').value='tighter'; b.querySelector('[data-act=approve]').click()}})()"
     yield 500
     text_after_A = entry().text
     check("(A)" in text_after_A, "approving A committed it into the card markdown")

@@ -9,6 +9,8 @@ Fenced (closed by a bare `:::` line):
     :::choice ID [multi] Title   options introduced by `@@ Label` lines -> pick one (or several)
     :::params ID Title           `name = value [min, max, step]` / `{a, b}` / true / "text" lines
     :::checklist ID Title        `- [ ]` / `- [~]` (doing) / `- [x]` items; Claude ticks them live
+    :::gallery ID Title          multi-image viewer: `cols: A | B | ...`, optional `alt: name`, then rows
+                                 `# Row title` / `/abs/a.png | /abs/b.png | ...` / optional `alt: /a2.png | ...`
 Single line:
     :::ask ID Prompt text        free-text answer box
     :::pdf PATH [vs=PATH] [pages=1,3-4|all|changed] [dpi=N] [id=ID] [labels="A,B"] [caption="..."]
@@ -105,6 +107,22 @@ def _decision_foot(placeholder: str = "Note for Claude (required for “Request 
             '<button class="ia-btn mid" data-act="changes">✎ Request changes</button>'
             '<button class="ia-btn bad" data-act="reject">✕ Reject</button>'
             '</div></div>')
+
+
+def _editor(text: str, base: str, opt: str | None = None) -> str:
+    """The plain-text editor for a proposal: a textarea (never markdown-rendered, so LaTeX round-trips),
+    a live word diff, the edited -> sent -> replied steps and the Send button. Behaviour lives in the page JS."""
+    o = "" if opt is None else f' data-opt="{H.escape(opt, True)}"'
+    return (f'<div class="ia-ed" data-orig="{H.escape(text, True)}" data-base="{H.escape(base, True)}"{o}>'
+            f'<textarea class="ia-edta" data-ia-edit spellcheck="false" rows="3" '
+            f'aria-label="Edit the proposed wording (plain text)">\n{H.escape(text)}</textarea>'
+            '<div class="ia-edsteps" hidden><span data-s="1">✎ edited</span><span data-s="2">➤ sent for review</span>'
+            '<span data-s="3">💬 Claude replied</span><span data-s="4">✓ approve my version</span></div>'
+            '<div class="ia-edlive ia-src tex2jax_ignore" hidden></div>'
+            '<div class="ia-edalt tex2jax_ignore" hidden></div>'
+            '<div class="ia-edactions"><button type="button" class="ia-btn mid" data-act="ed-send" disabled>'
+            'Send my version for review</button>'
+            '<button type="button" class="ia-btn" data-act="ed-reset" hidden>↺ Reset to the proposal</button></div></div>')
 
 
 # ── word diff ────────────────────────────────────────────────────────────────
@@ -292,6 +310,80 @@ def viewer(kind: str, args: str) -> str:
     return "".join(out)
 
 
+# ── gallery (multi-image viewer) ─────────────────────────────────────────────
+
+def gallery(bid: str, title: str, body: str) -> str:
+    """Rows of images that share one set of column labels (e.g. a figure x colour scheme), with an
+    optional alternate layer per image (e.g. a colour-blindness simulation). Views: single image
+    (flip with keys), grid (all columns of one row), matrix (everything as thumbnails)."""
+    cols, alt_name, rows, cur = [], "", [], None
+
+    def paths(s: str, where: str) -> list[str] | None:
+        ps = [os.path.expanduser(x.strip()) for x in s.split("|")]
+        for q in ps:
+            if q and not os.path.isabs(q):
+                WARNINGS.append(f"gallery '{bid}' {where}: {q}: use an absolute path"); return None
+            if q and not os.path.exists(q):
+                WARNINGS.append(f"gallery '{bid}' {where}: {q}: file not found"); return None
+        return ps
+
+    for line in body.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.lower().startswith("cols:"):
+            cols = [c.strip() for c in s[5:].split("|")]
+        elif s.startswith("#"):
+            cur = {"title": s.lstrip("#").strip(), "main": None, "alt": None}; rows.append(cur)
+        elif s.lower().startswith("alt:"):
+            rest = s[4:].strip()
+            if cur is None or "/" not in rest:
+                alt_name = rest
+            elif (ps := paths(rest, f"row '{cur['title']}' alt")) is not None:
+                cur["alt"] = ps
+        elif cur is not None and cur["main"] is None:
+            ps = paths(s, f"row '{cur['title']}'")
+            if ps is not None:
+                cur["main"] = ps
+        else:
+            WARNINGS.append(f"gallery '{bid}': ignoring line {s[:80]!r}")
+    rows = [r for r in rows if r["main"]]
+    if not cols or not rows:
+        return _warn(f"gallery '{bid}': needs a `cols: A | B` line and at least one `# Row` with image paths")
+    n = len(cols)
+    has_alt = any(r["alt"] for r in rows)
+    BLOCKS.append(("gallery", bid, _h(body + "|" + "|".join(_key(q) for r in rows for q in (r["main"] + (r["alt"] or [])) if q))))
+
+    def url(q: str) -> str:
+        return _src(q) if q else ""
+
+    data = []
+    for i, r in enumerate(rows):
+        main = (r["main"] + [""] * n)[:n]
+        alt = ((r["alt"] or []) + [""] * n)[:n]
+        data.append(f'<div class="ia-grow" data-row="{i}" data-title="{H.escape(r["title"], True)}">'
+                    + "".join(f'<span data-c="{j}" data-src="{url(a)}" data-alt="{url(b)}"></span>'
+                              for j, (a, b) in enumerate(zip(main, alt))) + "</div>")
+    rbtn = "".join(f'<button data-act="grow" data-row="{i}"{" class=on" if i == 0 else ""}>{H.escape(r["title"])}</button>'
+                   for i, r in enumerate(rows))
+    cbtn = "".join(f'<button data-act="gcol" data-col="{j}"{" class=on" if j == 0 else ""}>'
+                   f'<b>{j}</b> {H.escape(c)}</button>' for j, c in enumerate(cols))
+    modes = "".join(f'<button data-act="gmode" data-mode="{m}"{" class=on" if m == "single" else ""}>{lab}</button>'
+                    for m, lab in (("single", "Single"), ("grid", "Grid"), ("matrix", "Matrix")))
+    altb = (f'<button data-act="galt">{H.escape(alt_name or "alternate")} (d)</button>' if has_alt else "")
+    attrs = (f' tabindex="0" data-mode="single" data-row="0" data-col="0" data-alt="0"'
+             f' data-cols="{H.escape("|".join(cols), True)}" data-alt-name="{H.escape(alt_name, True)}"')
+    return (_open("gallery", bid, title or "Gallery", attrs)
+            + f'<div class="ia-gbar ia-grows">{rbtn}</div>'
+            + f'<div class="ia-gbar ia-gcols">{cbtn}</div>'
+            + f'<div class="ia-gbar">{modes}{altb}<span class="ia-sp"></span>'
+              '<span class="ia-hint">←/→ or 0–9 column · ↑/↓ row · g grid · m matrix · d alternate · click a tile to open</span></div>'
+            + f'<div class="ia-gdata" hidden>{"".join(data)}</div><div class="ia-gstage"></div>'
+            + '<div class="ia-foot"><textarea rows="1" placeholder="Note (optional)…"></textarea>'
+              '<div class="ia-actions"><button class="ia-btn ok" data-act="gpick">★ Prefer the shown column for this row</button>'
+              '<button class="ia-btn" data-act="gpickall">★ Prefer the shown column for every row</button></div></div></div>')
+
+
 # ── params ───────────────────────────────────────────────────────────────────
 
 def params_form(body: str) -> str:
@@ -353,8 +445,11 @@ def process(text: str, md, put) -> str:
                          f'<div class="ia-src tex2jax_ignore">{H.escape(old)}</div>']
             else:
                 views = [md(word_diff(old, new, False)), md(new), md(old)]
+            hint = '<div class="ia-hint ia-edhint">Edit the <b>New</b> tab to change the wording yourself.</div>'
+            views[0] = hint + views[0]
+            views[1] = _editor(new, old) + f'<div class="ia-newview" hidden>{views[1]}</div>'
             tabs = ('<div class="ia-tabs"><button class="on" data-act="tab" data-tab="0">Changes</button>'
-                    '<button data-act="tab" data-tab="1">New</button><button data-act="tab" data-tab="2">Old</button></div>')
+                    '<button data-act="tab" data-tab="1">New ✎</button><button data-act="tab" data-tab="2">Old</button></div>')
             panes = "".join(f'<div class="ia-pane"{"" if i == 0 else " hidden"}>{v}</div>' for i, v in enumerate(views))
             return put(_open(kind, bid, title or "Proposed change") + tabs + f'<div class="ia-body">{panes}</div>' + _decision_foot() + "</div>")
         if kind == "choice":
@@ -369,7 +464,9 @@ def process(text: str, md, put) -> str:
                 lab = lab.strip() or chr(65 + i)
                 btn = "Select" if multi else f"Pick {H.escape(lab)}"
                 cards.append(f'<div class="ia-opt" data-label="{H.escape(lab, True)}" data-src="{H.escape(ob.strip(), True)}">'
-                             f'<div class="ia-olabel">{H.escape(lab)}</div><div class="ia-obody">{md(ob)}</div>'
+                             f'<div class="ia-olabel">{H.escape(lab)}<button type="button" class="ia-oedit" data-act="ed-open" '
+                             f'aria-expanded="false">✎ Edit wording</button></div><div class="ia-obody">{md(ob)}</div>'
+                             f'{_editor(ob.strip(), ob.strip(), lab)}'
                              f'<button class="ia-btn" data-act="pick">{btn}</button></div>')
             foot = ('<div class="ia-foot"><textarea rows="2" placeholder="Comment (optional; required for “none”)…"></textarea>'
                     '<div class="ia-actions">'
@@ -394,6 +491,9 @@ def process(text: str, md, put) -> str:
             return put(_open(kind, bid, title or "Checklist") + '<div class="ia-prog"><div></div></div>'
                        f'<ul class="ia-cklist">{"".join(items)}</ul>'
                        '<div class="ia-ckadd"><input placeholder="Suggest another item… (Enter)"></div></div>')
+        if kind == "gallery":
+            bid, _, title = _split_head(kind, head)
+            return put(gallery(bid, title, body))
         if kind == "params":
             bid, _, title = _split_head(kind, head)
             return put(_open(kind, bid, title or "Parameters") + f'<div class="ia-pgrid">{params_form(body)}</div>'
@@ -401,7 +501,7 @@ def process(text: str, md, put) -> str:
                        '<div class="ia-actions"><button class="ia-btn ok" data-act="send">Send values ▶</button></div></div></div>')
         return m.group(0)
 
-    text = re.sub(r"^:::(approve|diff|choice|params|checklist)\b[ \t]*(.*)\n([\s\S]*?)^:::[ \t]*$",
+    text = re.sub(r"^:::(approve|diff|choice|params|checklist|gallery)\b[ \t]*(.*)\n([\s\S]*?)^:::[ \t]*$",
                   fenced, text, flags=re.M)
 
     def ask(m: re.Match) -> str:
@@ -560,10 +660,70 @@ HEAD = r"""
     try { window.webkit.messageHandlers.claudeEvent.postMessage(ev); }
     catch (e) { toast('Panel not connected', true); return false; }
     IA._out[ev.cid] = { el: el || null, type: ev.type };
+    if (ev.type !== '_draft') IA._clearDrafts(ev);
     toast('Sent ✓ — waiting for Claude'); return true;
+  };
+  // --- unsent text: saved on every keystroke so a re-render (edit, refresh, restart) can't eat it,
+  //     and so the panel refuses `panel.sh edit` on a card while Alex is mid-sentence
+  IA._dkeys = {}; var _dT = {};
+  function draftKey(el) {
+    if (!el || !el.matches || !el.matches('textarea, input[type=text], input:not([type])')) return null;
+    if (el.hasAttribute('data-ia-edit')) return null;   // proposal editors keep their own drafts ('e:' keys, see IA.edSync)
+    if (el.closest('#ia-composer')) return 'composer';
+    var pop = el.closest('.ia-pop, #ia-selpop, #ia-rwpop');
+    var block = el.closest('.ia');
+    if (pop) return 'pop:' + (block && block.dataset.iaId || '_page');
+    if (!block || !block.dataset.iaId) return null;
+    var f = $all(block, 'textarea, input[type=text], input:not([type])')
+      .filter(function (x) { return x.closest('.ia') === block && !x.closest('.ia-pop') && !x.hasAttribute('data-ia-edit'); });
+    return 'b:' + block.dataset.iaId + ':' + f.indexOf(el);
+  }
+  function postDraft(key, text) {   // exposed as IA.postDraft below
+    var sv = window._iaSaved || {};
+    if (text.trim()) IA._dkeys[key] = 1; else delete IA._dkeys[key];
+    try { window.webkit.messageHandlers.claudeEvent.postMessage({ type: '_draft', card: sv.card || null, key: key, text: text }); }
+    catch (e) {}
+  }
+  IA.postDraft = function (key, text) { clearTimeout(_dT[key]); postDraft(key, text); };
+  IA._dT = _dT;
+  document.addEventListener('input', function (e) {
+    var el = e.target, key = draftKey(el); if (!key) return;
+    clearTimeout(_dT[key]); _dT[key] = setTimeout(function () { postDraft(key, el.value || ''); }, 250);
+  }, true);
+  IA._clearDrafts = function (ev) {
+    if (ev.type === 'diff_edit') return;   // sending an edit for review is not sending the note
+    var carries = ['note', 'answer', 'comment', 'text', 'instruction'].some(function (f) { return ev[f] !== undefined; });
+    if (!carries) return;
+    Object.keys(IA._dkeys).forEach(function (k) {
+      if (k.indexOf('pop:') === 0 || (ev.id && k.indexOf('b:' + ev.id + ':') === 0) || (ev.type === 'message' && k === 'composer')) {
+        clearTimeout(_dT[k]); postDraft(k, '');
+      }
+    });
+  };
+  IA.restoreDrafts = function () {
+    var d = (window._iaSaved || {}).drafts || {}, n = 0;
+    Object.keys(d).forEach(function (k) {
+      var el = null;
+      if (k === 'composer') el = document.querySelector('#ia-composer input');
+      else if (k.indexOf('b:') === 0) {
+        var i = k.lastIndexOf(':'), id = k.slice(2, i), idx = +k.slice(i + 1);
+        var block = $all(document, '.ia[data-ia-id]').filter(function (x) { return x.dataset.iaId === id; }).pop();
+        if (block) el = $all(block, 'textarea, input[type=text], input:not([type])')
+          .filter(function (x) { return x.closest('.ia') === block && !x.closest('.ia-pop') && !x.hasAttribute('data-ia-edit'); })[idx] || null;
+      } else if (k.indexOf('e:') === 0) {   // an unsent edit of a proposal
+        var rest = k.slice(2), j = rest.indexOf(':');
+        var ed = IA.edFind(j < 0 ? rest : rest.slice(0, j), j < 0 ? null : rest.slice(j + 1));
+        if (ed) { var ta = ed.querySelector('textarea'); if (ta.value !== d[k]) { ta.value = d[k]; ta.classList.add('ia-restored'); n++; } IA.edOpen(ed); }
+      }
+      IA._dkeys[k] = 1;   // still unsent, wherever it lives
+      if (el && el.value !== d[k]) { el.value = d[k]; el.classList.add('ia-restored'); n++; }
+    });
+    if (IA.edRefreshAll) IA.edRefreshAll();
+    if (n) toast('Restored your unsent text');
   };
   IA.refused = function (cid, why) {   // the panel rejected a click (card changed under it)
     var o = IA._out[cid]; delete IA._out[cid];
+    if (o && o.el && o.el.classList.contains('ia-ed') && IA.edUnsent) IA.edUnsent(o.el);
     if (o && o.el) { var s = own(o.el, '.ia-status'); if (s) { s.textContent = 'not sent'; s.classList.remove('on'); } }
     toast(why, true);
   };
@@ -578,6 +738,10 @@ HEAD = r"""
 
   function markDecision(block, ev) {
     var k = block.dataset.iaKind;
+    if (k === 'diff' && ev.edited_text !== undefined && IA.edFinal) IA.edFinal(block, null, ev.edited_text);
+    if (k === 'choice' && IA.edFinal) (ev.picked || []).forEach(function (l, i) {
+      if ((ev.picked_edited || [])[i]) IA.edFinal(block, l, (ev.picked_text || [])[i]);
+    });
     if (k === 'approve' || k === 'diff') {
       $all(block, '.ia-actions [data-act]').forEach(function (b) {
         if (b.closest('.ia') === block) b.classList.toggle('on', b.dataset.act === ev.decision);
@@ -608,6 +772,7 @@ HEAD = r"""
   function onAction(b) {
     var block = b.closest('.ia'); if (!block) return;
     var k = block.dataset.iaKind, act = b.dataset.act, ev = base(block);
+    if (act.indexOf('ed-') === 0) return IA.edAction(b, block);
     if (act === 'tab') {
       $all(block, '.ia-tabs button').forEach(function (x) { x.classList.toggle('on', x === b); });
       $all(block, '.ia-pane').forEach(function (p, i) { p.hidden = String(i) !== b.dataset.tab; });
@@ -625,6 +790,7 @@ HEAD = r"""
     }
     if (k === 'approve' || k === 'diff') {
       ev.type = k; ev.decision = act; ev.note = note(block);
+      if (k === 'diff' && act === 'approve' && IA.edApprove && IA.edApprove(block, ev) === false) return;
       if (act === 'changes' && !ev.note) return needNote(block, 'Say what to change, then press “Request changes” again');
     } else if (k === 'choice') {
       var multi = block.dataset.multi === '1';
@@ -635,6 +801,7 @@ HEAD = r"""
       if (act === 'none' && !ev.note) return needNote(block, 'Say what you want instead, then press “None of these” again');
       ev.picked = opts.map(function (o) { return o.dataset.label; });
       ev.picked_text = opts.map(function (o) { return o.dataset.src; });
+      if (IA.edPick && IA.edPick(opts, ev) === false) return;
     } else if (k === 'ask') {
       ev.type = 'ask'; ev.answer = note(block);
       if (!ev.answer) return toast('Nothing to send', true);
@@ -950,13 +1117,14 @@ HEAD += r"""
   function markSeen(o) {
     if (!o || o.seen) return; o.seen = true;
     var el = o.el; if (!el) return;
-    if (el.classList.contains('ia-pin')) { el.classList.add('seen'); return; }
+    if (el.classList.contains('ia-pin') || el.classList.contains('ia-ed')) { el.classList.add('seen'); return; }
     var s = IA.own(el, '.ia-status');
     if (s && s.classList.contains('on') && s.textContent.indexOf('seen') < 0) { s.textContent += ' · seen ✓'; s.classList.add('seen'); }
   }
   IA.sent = function (cid, seq) {
     var o = IA._out[cid]; if (!o) return;
     o.seq = seq; IA._bySeq[seq] = o;
+    if (o.el && o.el.classList.contains('ia-ed') && IA.edConfirmed) IA.edConfirmed(o.el);
     if (seq <= IA._cursor) markSeen(o);
   };
   IA.seen = function (cursor, quiet) {
@@ -1121,8 +1289,10 @@ HEAD += r"""
   IA.applyRewrite = function (block, decision) {
     var el = document.querySelector('[data-para="' + block.dataset.rw + '"]'); if (!el) return;
     if (el._orig === undefined) el._orig = el.innerHTML;
-    if (decision === 'approve') {
-      var pane = block.querySelectorAll('.ia-pane')[1];
+    if (decision === 'approve' && block.querySelector('.ia-ed[data-edited]')) {
+      collapse(block, true);   // the author's own wording: the panel re-renders the card from the committed text
+    } else if (decision === 'approve') {
+      var pane = block.querySelector('.ia-newview');
       var ps = pane.querySelectorAll(':scope > p');
       el.innerHTML = ps.length === 1 ? ps[0].innerHTML : pane.innerHTML;
       el.classList.add('rw-applied'); collapse(block, true);
@@ -1199,11 +1369,13 @@ HEAD += r"""
 HEAD += r"""
 <style>
   .ia-revnote { padding: 6px 14px; font-size: 13px; color: #6b4e00; background: #fbf3dc; border-bottom: 1px solid #ecdcae; }
+  .ia-restored { box-shadow: 0 0 0 2px #f3d98b; }
   .ia-pin.old { opacity: .45; background: #8a96a3; outline: 2px dashed #8a96a3; outline-offset: 1px; }
 </style>
 <script>
 document.addEventListener('DOMContentLoaded', function () {
   var IA = window.IA, saved = window._iaSaved || {};
+  setTimeout(function () { if (IA.restoreDrafts) IA.restoreDrafts(); }, 0);
   Object.keys(saved.revised || {}).forEach(function (id) {
     var b = IA.all(document, '.ia[data-ia-id]').filter(function (x) { return x.dataset.iaId === id; }).pop();
     if (!b) return;
@@ -1230,5 +1402,361 @@ document.addEventListener('DOMContentLoaded', function () {
     IA.toast('Updated in place');
   }
 });
+</script>
+"""
+
+# fourth chunk: editable proposals (diff "New" text, choice options): plain-text editor, live word diff,
+# edited -> sent for review -> Claude replied -> approve my version
+HEAD += r"""
+<style>
+  .ia-edhint { padding: 6px 0 0; }
+  .ia-ed { padding: 8px 0 10px; }
+  .ia-ed .ia-edta { width: 100%; box-sizing: border-box; font: 13.5px/1.55 'JetBrains Mono', monospace; padding: 8px 10px;
+    border: 1px solid #b7c2ce; border-radius: 5px; background: #fff; color: #131a21; resize: vertical; min-height: 4.5em;
+    white-space: pre-wrap; }
+  .ia-ed[data-edited] .ia-edta { border-color: #856000; box-shadow: 0 0 0 2px #f3d98b; }
+  .ia-edsteps { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 2px; font: 12px system-ui, sans-serif; }
+  .ia-edsteps span { padding: 2px 9px; border-radius: 10px; background: #e3ebf4; color: #3f536a; border: 1px solid #c3cbd5; }
+  .ia-edsteps span.done { background: #f3e3b5; color: #6b4e00; border-color: #ecdcae; }
+  .ia-edsteps span.now { font-weight: 700; box-shadow: 0 0 0 2px #856000; }
+  .ia-ed.seen .ia-edsteps span[data-s="2"].done::after { content: " ✓"; }
+  .ia-edsteps span[data-s="3"].done, .ia-edsteps span[data-s="4"].ready { background: #cfeedd; color: #14532d; border-color: #9fd5b3; }
+  .ia-edsteps span[data-s="4"].ready { font-weight: 700; }
+  .ia-edlive { border-top: 1px dashed #c3cbd5; margin-top: 8px; }
+  .ia-edlive::before { content: attr(data-cap); display: block; font: 12px system-ui, sans-serif; color: #3f536a; padding-top: 6px; }
+  .ia-edactions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .ia-edalt { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+  .ia-edalt > div { border: 1px solid #c3cbd5; border-radius: 6px; background: #fff; padding: 6px 10px 8px; }
+  .ia-edalt > div.claude { border-left: 3px solid #2b5d8a; }
+  .ia-edalt b { font: 600 12px system-ui, sans-serif; color: #3f536a; }
+  .ia-btn[disabled] { opacity: .45; cursor: not-allowed; }
+  .ia-oedit { float: right; font: 12px system-ui, sans-serif; padding: 1px 8px; }
+  .ia-opt:not(.editing) .ia-ed { display: none; }
+  .ia-opt.editing .ia-obody { display: none; }
+</style>
+<script>
+(function () {
+  var IA = window.IA, $all = IA.all;
+  var TOK = /\$\$[\s\S]+?\$\$|\$[^$\n]+?\$|\s+|[^\s$]+|\$/g;
+  function norm(s) { return String(s == null ? '' : s).replace(/\r\n?/g, '\n').replace(/\s+$/, ''); }
+
+  /* word diff of plain text, same tokens as the Python side; returns a DocumentFragment of text / <del> / <ins> */
+  function diffFrag(a, b) {
+    var A = norm(a).match(TOK) || [], B = norm(b).match(TOK) || [], n = A.length, m = B.length, f = document.createDocumentFragment();
+    function add(tag, toks) {
+      var t = toks.join(''); if (!t) return;
+      if (!tag) { f.appendChild(document.createTextNode(t)); return; }
+      var e = document.createElement(tag); e.textContent = t; f.appendChild(e);
+    }
+    if (n + m === 0) return f;
+    if (n * m > 4e6) { add('del', A); add('ins', B); return f; }
+    var W = m + 1, dp = new Uint16Array((n + 1) * W);
+    for (var i = n - 1; i >= 0; i--) for (var j = m - 1; j >= 0; j--)
+      dp[i * W + j] = A[i] === B[j] ? dp[(i + 1) * W + j + 1] + 1 : Math.max(dp[(i + 1) * W + j], dp[i * W + j + 1]);
+    if (2 * dp[0] / (n + m) < 0.45) { add('del', A); f.appendChild(document.createTextNode('\n\n')); add('ins', B); return f; }
+    var i2 = 0, j2 = 0, eq = [], del = [], ins = [];
+    function flush() { add(null, eq); add('del', del); add('ins', ins); eq = []; del = []; ins = []; }
+    while (i2 < n || j2 < m) {
+      if (i2 < n && j2 < m && A[i2] === B[j2]) { if (del.length || ins.length) { add(null, eq); eq = []; add('del', del); add('ins', ins); del = []; ins = []; } eq.push(A[i2]); i2++; j2++; }
+      else if (j2 >= m || (i2 < n && dp[(i2 + 1) * W + j2] >= dp[i2 * W + j2 + 1])) del.push(A[i2++]);
+      else ins.push(B[j2++]);
+    }
+    flush(); return f;
+  }
+  function fill(el, frag) { while (el.firstChild) el.removeChild(el.firstChild); el.appendChild(frag); }
+
+  IA.edFind = function (id, opt) {
+    var blocks = $all(document, '.ia[data-ia-id]').filter(function (b) { return b.dataset.iaId === id; });
+    var block = blocks[blocks.length - 1]; if (!block) return null;
+    return $all(block, '.ia-ed').filter(function (e) {
+      return e.closest('.ia') === block && (opt == null ? e.dataset.opt === undefined : e.dataset.opt === opt);
+    })[0] || null;
+  };
+  function key(ed) { var b = ed.closest('.ia'); return 'e:' + b.dataset.iaId + (ed.dataset.opt !== undefined ? ':' + ed.dataset.opt : ''); }
+  function stOf(ed) { return ed._st || (ed._st = { sent: null, sending: null, replied: false, alt: null }); }
+  function textOf(ed) { return norm(ed.querySelector('textarea').value); }
+  /* 0 = as proposed, 1 = edited, 2 = sent for review, 3 = Claude replied (the edited version may be approved) */
+  function stepOf(ed) {
+    var t = textOf(ed), st = stOf(ed);
+    if (t === norm(ed.dataset.orig)) return 0;
+    if (st.alt !== null && t === norm(st.alt)) return 3;
+    if (st.sent !== null && t === st.sent) return st.replied ? 3 : 2;
+    return 1;
+  }
+  IA.edOpen = function (ed) { var o = ed.closest('.ia-opt'); if (o) o.classList.add('editing'); };
+
+  function render(ed) {
+    var ta = ed.querySelector('textarea'), st = stOf(ed), step = stepOf(ed), block = ed.closest('.ia'), isOpt = !!ed.closest('.ia-opt');
+    ta.style.height = 'auto'; ta.style.height = Math.max(ta.scrollHeight + 2, 72) + 'px';
+    if (step) ed.setAttribute('data-edited', ''); else ed.removeAttribute('data-edited');
+    var steps = ed.querySelector('.ia-edsteps'); steps.hidden = !step;
+    $all(steps, 'span').forEach(function (sp) {
+      var s = +sp.dataset.s;
+      sp.classList.toggle('done', s <= step && s < 4);
+      sp.classList.toggle('now', s === step);
+      sp.classList.toggle('ready', s === 4 && step === 3);
+    });
+    var live = ed.querySelector('.ia-edlive');
+    live.hidden = !step;
+    if (step) { live.dataset.cap = isOpt ? 'Your changes to this option' : 'Your changes to the proposed wording'; fill(live, diffFrag(ed.dataset.orig, textOf(ed))); }
+    var send = ed.querySelector('[data-act=ed-send]');
+    send.disabled = step !== 1;
+    send.textContent = st.sent !== null && step === 1 ? 'Send my changes again' : 'Send my version for review';
+    send.title = step === 1 ? 'Claude will give an opinion on your wording before anything is merged' :
+                 step === 0 ? 'Nothing changed yet' : step === 2 ? 'Sent - waiting for Claude' : 'Claude has replied';
+    ed.querySelector('[data-act=ed-reset]').hidden = !step;
+    if (!isOpt) {   // diff: the Changes tab and the Approve button follow the edited text
+      var pane = block.querySelector('.ia-pane'), body = block.querySelector('.ia-body');
+      if (pane && body) {
+        if (step && !pane._orig) pane._orig = pane.innerHTML;
+        if (step) { var d = document.createElement('div'); d.className = 'ia-src tex2jax_ignore'; fill(d, diffFrag(ed.dataset.base, textOf(ed))); pane.innerHTML = ''; pane.appendChild(d); }
+        else if (pane._orig) { pane.innerHTML = pane._orig; pane._orig = null; }
+      }
+      var ap = IA.own(block, '[data-act=approve]');
+      if (ap) {
+        ap.textContent = step ? '✓ Approve my version' : '✓ Approve';
+        ap.disabled = step === 1 || step === 2;
+        ap.title = step === 1 ? 'First press “Send my version for review” and wait for Claude’s opinion' :
+                   step === 2 ? 'Waiting for Claude’s opinion on your version' : '';
+      }
+    } else {
+      var opt = ed.closest('.ia-opt'), pk = opt.querySelector('[data-act=pick]');
+      opt.dataset.step = step;
+      if (pk) {
+        var multi = block.dataset.multi === '1';
+        pk.disabled = !multi && (step === 1 || step === 2);
+        pk.title = pk.disabled ? 'Send your edited option for review first, then wait for Claude' : '';
+      }
+      var tg = opt.querySelector('.ia-oedit'); if (tg && step) { opt.classList.add('editing'); tg.textContent = 'Hide editor'; tg.setAttribute('aria-expanded', 'true'); }
+    }
+    renderAlt(ed);
+  }
+  function renderAlt(ed) {
+    var st = stOf(ed), box = ed.querySelector('.ia-edalt');
+    box.hidden = st.alt === null; if (st.alt === null) { box.innerHTML = ''; return; }
+    box.innerHTML = '';
+    var l = document.createElement('div'), r = document.createElement('div'); r.className = 'claude';
+    var lh = document.createElement('b'); lh.textContent = 'Your version' + (st.sent !== null ? ' (as sent)' : '');
+    var lp = document.createElement('div'); lp.className = 'ia-src tex2jax_ignore'; lp.textContent = st.sent !== null ? st.sent : textOf(ed);
+    l.appendChild(lh); l.appendChild(lp);
+    var rh = document.createElement('b'); rh.textContent = 'Claude’s alternative (changes to your version)';
+    var rp = document.createElement('div'); rp.className = 'ia-src tex2jax_ignore'; fill(rp, diffFrag(st.sent !== null ? st.sent : textOf(ed), st.alt));
+    var use = document.createElement('button'); use.type = 'button'; use.className = 'ia-btn ok'; use.dataset.act = 'ed-use'; use.textContent = 'Use Claude’s wording';
+    r.appendChild(rh); r.appendChild(rp); r.appendChild(use);
+    box.appendChild(l); box.appendChild(r);
+  }
+  IA.edRefresh = render;
+  IA.edRefreshAll = function () { $all(document, '.ia-ed').forEach(render); };
+
+  /* unsent edited text is the draft: saved per keystroke so a re-render can't eat it and `panel.sh edit` is refused */
+  function sync(ed, now) {
+    var k = key(ed), t = textOf(ed), st = stOf(ed);
+    var unsent = t !== norm(ed.dataset.orig) && t !== st.sent;
+    clearTimeout(IA._dT[k]);
+    var go = function () { IA.postDraft(k, unsent ? ed.querySelector('textarea').value : ''); };
+    if (now) go(); else IA._dT[k] = setTimeout(go, 250);
+  }
+  document.addEventListener('input', function (e) {
+    var ta = e.target; if (!ta || !ta.hasAttribute || !ta.hasAttribute('data-ia-edit')) return;
+    var ed = ta.closest('.ia-ed'); render(ed); sync(ed, false);
+  }, true);
+  document.addEventListener('keydown', function (e) {   // Ctrl+Enter in the editor = Send my version for review
+    var ta = e.target; if (!ta || !ta.hasAttribute || !ta.hasAttribute('data-ia-edit')) return;
+    if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); var b = ta.closest('.ia-ed').querySelector('[data-act=ed-send]'); if (!b.disabled) b.click(); }
+  }, true);
+
+  IA.edUnsent = function (ed) { var st = stOf(ed); st.sending = null; st.sent = null; st.replied = false; render(ed); sync(ed, true); };
+  IA.edConfirmed = function (ed) {   // the panel has logged the event
+    var st = stOf(ed); if (st.sending === null) return;
+    st.sent = st.sending; st.sending = null; st.replied = false; st.alt = null; render(ed); sync(ed, true);
+  };
+  IA.editReplied = function (id, opt, alt, quiet) {   // Claude answered the sent version (alt = optional alternative wording)
+    var ed = IA.edFind(id, opt == null ? null : opt); if (!ed) return;
+    var st = stOf(ed); if (st.sent === null) st.sent = textOf(ed);
+    st.replied = true; if (alt != null) st.alt = alt;
+    render(ed);
+  };
+  IA.edFinal = function (block, label, text) {   // an approved / picked edited version, restored after a re-render
+    var ed = IA.edFind(block.dataset.iaId, label); if (!ed) return;
+    ed.querySelector('textarea').value = text;
+    var st = stOf(ed); st.sent = norm(text); st.replied = true; render(ed); sync(ed, true);
+  };
+  IA.edLoad = function (rec) {   // restore a sent edit from the panel's record of it
+    var ed = IA.edFind(rec.id, rec.option == null ? null : rec.option); if (!ed) return;
+    ed.querySelector('textarea').value = rec.text;
+    var st = stOf(ed); st.sent = norm(rec.text); st.replied = !!rec.replied; st.alt = rec.alt == null ? null : rec.alt;
+    render(ed);
+  };
+
+  IA.edAction = function (b, block) {
+    var act = b.dataset.act, ed = b.closest('.ia-ed') || (b.closest('.ia-opt') || block).querySelector('.ia-ed');
+    if (act === 'ed-open') {
+      var o = b.closest('.ia-opt'), on = !o.classList.contains('editing');
+      if (!on && stepOf(ed)) return IA.toast('Reset the option to hide an edited editor', true);
+      o.classList.toggle('editing', on); b.textContent = on ? 'Hide editor' : '✎ Edit wording'; b.setAttribute('aria-expanded', String(on));
+      if (on) ed.querySelector('textarea').focus();
+      render(ed); return;
+    }
+    var ta = ed.querySelector('textarea'), st = stOf(ed);
+    if (act === 'ed-reset') { ta.value = ed.dataset.orig; render(ed); sync(ed, true); return; }
+    if (act === 'ed-use') { ta.value = st.alt; render(ed); sync(ed, false); return; }
+    if (act === 'ed-send') {
+      if (stepOf(ed) !== 1) return;
+      var ev = { type: 'diff_edit', id: block.dataset.iaId, title: block.dataset.title || '', original: ed.dataset.orig, edited: textOf(ed) };
+      if (ed.dataset.opt !== undefined) ev.option = ed.dataset.opt; else ev.old = ed.dataset.base;
+      var t = IA.own(block, '.ia-foot textarea'); if (t && t.value.trim()) ev.note = t.value.trim();
+      if (IA.send(ev, ed)) { st.sending = ev.edited; IA.toast('Sent ✓ — Claude will give an opinion before you approve'); }
+    }
+  };
+  /* a decision on a diff / choice carrying edited text: only after Claude has replied to it */
+  IA.edApprove = function (block, ev) {
+    var ed = IA.own(block, '.ia-ed'); if (!ed) return true;
+    var step = stepOf(ed);
+    if (step === 1 || step === 2) { IA.toast(step === 1 ? 'Send your version for review first' : 'Waiting for Claude’s opinion on your version', true); return false; }
+    if (step === 3) { ev.edited_text = textOf(ed); ev.proposal_original = ed.dataset.orig; stOf(ed).sent = ev.edited_text; stOf(ed).replied = true; render(ed); sync(ed, true); }
+    return true;
+  };
+  IA.edPick = function (opts, ev) {
+    ev.picked_edited = [];
+    for (var i = 0; i < opts.length; i++) {
+      var ed = opts[i].querySelector('.ia-ed'), step = ed ? stepOf(ed) : 0;
+      if (step === 1 || step === 2) { IA.toast('Option ' + opts[i].dataset.label + ': ' + (step === 1 ? 'send your version for review first' : 'waiting for Claude’s opinion'), true); return false; }
+      ev.picked_edited.push(step === 3);
+      if (step === 3) { ev.picked_text[i] = textOf(ed); }
+    }
+    return true;
+  };
+
+  document.addEventListener('DOMContentLoaded', function () {
+    var saved = window._iaSaved || {};
+    Object.keys(saved.edits || {}).forEach(function (k) { IA.edLoad(saved.edits[k]); });
+    IA.edRefreshAll();
+  });
+  window.addEventListener('load', IA.edRefreshAll);   // textareas size themselves once fonts and layout are in
+})();
+</script>
+"""
+
+# fourth chunk: :::gallery multi-image viewer
+HEAD += r"""
+<style>
+  .ia-gallery:focus { outline: 2px solid #2b5d8a; outline-offset: -2px; }
+  .ia-gbar { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; padding: 6px 14px 0; }
+  .ia-gbar:last-of-type { padding-bottom: 6px; }
+  .ia-gbar .ia-sp { flex: 1; }
+  .ia-gbar button.on { background: #2b5d8a; border-color: #2b5d8a; color: #fff; }
+  .ia-gcols button b { font-family: 'JetBrains Mono', monospace; margin-right: 2px; }
+  .ia-gstage { padding: 8px 14px; }
+  .ia-gstage .ia-gcap { font: 600 13px system-ui, sans-serif; margin: 2px 0 6px; color: #1a212a; }
+  .ia-gstage img { width: 100%; display: block; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+  .ia-gsingle img { max-height: 78vh; object-fit: contain; }
+  .ia-ggrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 10px; }
+  .ia-gmatrix { display: grid; gap: 6px; align-items: start; }
+  .ia-gmatrix .ia-gh { font: 600 11px system-ui, sans-serif; color: #3f536a; }
+  .ia-gtile { cursor: pointer; border: 2px solid transparent; border-radius: 4px; padding: 2px; }
+  .ia-gtile:hover { border-color: #9aa9ba; }
+  .ia-gtile.on { border-color: #2b5d8a; }
+  .ia-gtile.star { box-shadow: 0 0 0 3px #e0b000; }
+  .ia-gtile figcaption { font: 12px system-ui, sans-serif; margin-bottom: 2px; }
+  .ia-gmissing { padding: 30px; text-align: center; color: #777; background: #fff; }
+</style>
+<script>
+(function () {
+  var $all = function (r, s) { return Array.prototype.slice.call(r.querySelectorAll(s)); };
+  var active = null;
+  function st(g) { return { row: +g.dataset.row, col: +g.dataset.col, alt: g.dataset.alt === '1', mode: g.dataset.mode }; }
+  function cell(g, r, c, alt) {
+    var s = g.querySelector('.ia-grow[data-row="' + r + '"] [data-c="' + c + '"]');
+    if (!s) return '';
+    return (alt && s.dataset.alt) ? s.dataset.alt : s.dataset.src;
+  }
+  function rowsOf(g) { return $all(g, '.ia-grow'); }
+  function cols(g) { return g.dataset.cols.split('|'); }
+  function img(src) { return src ? '<img src="' + src + '" draggable="false" loading="lazy">' : '<div class="ia-gmissing">no image</div>'; }
+  function draw(g) {
+    var s = st(g), C = cols(g), R = rowsOf(g), stage = g.querySelector('.ia-gstage'), stars = g._stars || {};
+    var rt = R[s.row].dataset.title, alt = s.alt ? ' · ' + (g.dataset.altName || 'alternate') : '';
+    $all(g, '[data-act=grow]').forEach(function (b) { b.classList.toggle('on', +b.dataset.row === s.row); });
+    $all(g, '[data-act=gcol]').forEach(function (b) { b.classList.toggle('on', +b.dataset.col === s.col); });
+    $all(g, '[data-act=gmode]').forEach(function (b) { b.classList.toggle('on', b.dataset.mode === s.mode); });
+    $all(g, '[data-act=galt]').forEach(function (b) { b.classList.toggle('on', s.alt); });
+    var h = '';
+    if (s.mode === 'single') {
+      h = '<div class="ia-gsingle"><div class="ia-gcap">' + esc(rt) + ' — ' + s.col + ' ' + esc(C[s.col]) + alt
+        + (stars[s.row] === s.col ? ' ★' : '') + '</div>' + img(cell(g, s.row, s.col, s.alt)) + '</div>';
+    } else if (s.mode === 'grid') {
+      h = '<div class="ia-gcap">' + esc(rt) + alt + '</div><div class="ia-ggrid">' + C.map(function (c, j) {
+        return '<figure class="ia-gtile' + (j === s.col ? ' on' : '') + (stars[s.row] === j ? ' star' : '') + '" data-r="' + s.row + '" data-c="' + j + '">'
+          + '<figcaption><b>' + j + '</b> ' + esc(c) + (stars[s.row] === j ? ' ★' : '') + '</figcaption>' + img(cell(g, s.row, j, s.alt)) + '</figure>';
+      }).join('') + '</div>';
+    } else {
+      h = '<div class="ia-gmatrix" style="grid-template-columns: 9em repeat(' + C.length + ', 1fr)"><span></span>'
+        + C.map(function (c, j) { return '<span class="ia-gh">' + j + ' ' + esc(c) + '</span>'; }).join('');
+      R.forEach(function (r, i) {
+        h += '<span class="ia-gh">' + esc(r.dataset.title) + '</span>' + C.map(function (c, j) {
+          return '<figure class="ia-gtile' + (i === s.row && j === s.col ? ' on' : '') + (stars[i] === j ? ' star' : '') + '" data-r="' + i + '" data-c="' + j + '">'
+            + img(cell(g, i, j, s.alt)) + '</figure>';
+        }).join('');
+      });
+      h += '</div>';
+    }
+    stage.innerHTML = h;
+  }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function set(g, k, v) { g.dataset[k] = v; draw(g); }
+  function pick(g, all) {
+    var s = st(g), C = cols(g), R = rowsOf(g), ta = g.querySelector('.ia-foot textarea');
+    var rows = all ? R.map(function (_, i) { return i; }) : [s.row];
+    g._stars = g._stars || {}; rows.forEach(function (i) { g._stars[i] = s.col; });
+    var ev = { type: 'gallery', id: g.dataset.iaId, title: g.dataset.title || '', col: s.col, col_label: C[s.col],
+               rows: rows.map(function (i) { return R[i].dataset.title; }), alt_shown: s.alt,
+               note: ta ? ta.value.trim() : '' };
+    if (IA.send(ev, g)) {
+      var stx = g.querySelector('.ia-status'); if (stx) { stx.textContent = '★ ' + s.col + ' ' + C[s.col] + (all ? ' (all rows)' : ' for ' + R[s.row].dataset.title); stx.classList.add('on'); }
+      draw(g);
+    }
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target.nodeType === 1 ? e.target : e.target.parentElement, g = t && t.closest('.ia-gallery');
+    if (!g) return;
+    active = g;
+    var b = t.closest('[data-act]');
+    if (b) {
+      var a = b.dataset.act;
+      if (a === 'grow') set(g, 'row', b.dataset.row);
+      else if (a === 'gcol') set(g, 'col', b.dataset.col);
+      else if (a === 'gmode') set(g, 'mode', b.dataset.mode);
+      else if (a === 'galt') set(g, 'alt', g.dataset.alt === '1' ? '0' : '1');
+      else if (a === 'gpick') pick(g, false);
+      else if (a === 'gpickall') pick(g, true);
+      else return;
+      e.stopPropagation(); return;
+    }
+    var tile = t.closest('.ia-gtile');
+    if (tile) { g.dataset.row = tile.dataset.r; g.dataset.col = tile.dataset.c; set(g, 'mode', 'single'); e.stopPropagation(); }
+  }, true);
+  document.addEventListener('mouseover', function (e) {
+    var t = e.target.nodeType === 1 ? e.target : e.target.parentElement, g = t && t.closest && t.closest('.ia-gallery');
+    active = g || null;   // keys drive a gallery only while the pointer is over it
+  });
+  document.addEventListener('keydown', function (e) {
+    var tg = e.target;
+    if (!active || !document.body.contains(active) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (tg && (tg.tagName === 'TEXTAREA' || tg.tagName === 'INPUT' || tg.isContentEditable)) return;
+    var g = active, s = st(g), nc = cols(g).length, nr = rowsOf(g).length, k = e.key, done = true;
+    if (/^[0-9]$/.test(k) && +k < nc) set(g, 'col', k);
+    else if (k === 'ArrowRight') set(g, 'col', (s.col + 1) % nc);
+    else if (k === 'ArrowLeft') set(g, 'col', (s.col + nc - 1) % nc);
+    else if (k === 'ArrowDown') set(g, 'row', (s.row + 1) % nr);
+    else if (k === 'ArrowUp') set(g, 'row', (s.row + nr - 1) % nr);
+    else if (k === 'd' && g.querySelector('[data-act=galt]')) set(g, 'alt', s.alt ? '0' : '1');
+    else if (k === 'g') set(g, 'mode', s.mode === 'grid' ? 'single' : 'grid');
+    else if (k === 'm') set(g, 'mode', s.mode === 'matrix' ? 'single' : 'matrix');
+    else if (k === 's') set(g, 'mode', 'single');
+    else done = false;
+    if (done) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+  document.addEventListener('DOMContentLoaded', function () { $all(document, '.ia-gallery').forEach(draw); });
+})();
 </script>
 """

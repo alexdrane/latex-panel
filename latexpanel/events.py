@@ -8,11 +8,12 @@ Monitor tool on `panel.sh watch` so every click arrives as a notification.
     events.py watch                 stream new events, one readable line each (for Monitor)
     events.py events [--all]        print unread events and mark them read
     events.py wait [--id ID] [--timeout S]   block until an event (for block ID) arrives
-    events.py show SEQ                       one event in full (lines are shortened)
+    events.py show SEQ | show-event SEQ [--field F]   one event's full JSON (--field F: just that field, raw)
     events.py changed OLD.pdf NEW.pdf        pages whose rendering differs
 
 Claude -> panel (live, no new history entry):
     events.py reply TARGET TEXT...          TARGET = block id or #seq of the event answered
+    events.py alt SEQ [--note N] < wording  your opinion on a `diff_edit` + alternative wording shown beside the author's
     events.py suggest SEQ [--note N] < new  in-place rewrite proposal for a `rewrite` event
     events.py tick ID ITEM [todo|doing|done]   update a :::checklist item (1-based or text)
     events.py current [--latest|--entry N|--event SEQ]  copy a card's markdown to edit.md for in-place editing
@@ -35,6 +36,23 @@ EVENTS     = os.path.join(DATA_DIR, "events.jsonl")
 CURSOR     = os.path.join(DATA_DIR, "events.cursor")
 WATCH_PID  = os.path.join(DATA_DIR, "watcher.pid")
 TO_PANEL   = os.path.join(DATA_DIR, "to_panel.jsonl")
+DRAFTS     = os.path.join(DATA_DIR, "drafts.json")   # unsent text in the panel, per card (renderer writes it)
+
+
+def load_drafts() -> dict:
+    try:
+        with open(DRAFTS) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_drafts(d: dict):
+    tmp = DRAFTS + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f)
+    os.replace(tmp, DRAFTS)
 STATE      = os.path.join(DATA_DIR, "state.json")
 EDIT_FILE  = os.path.join(DATA_DIR, "edit.md")
 EDIT_UID   = os.path.join(DATA_DIR, "edit.uid")
@@ -126,15 +144,21 @@ def unread() -> list[dict]:
 
 
 def _q(s, n: int = 400) -> str:
+    """One-line quoted text, whitespace collapsed; n=0 means never shorten."""
     s = " ".join(str(s or "").split())
-    return json.dumps(s if len(s) <= n else s[: n - 1] + "…", ensure_ascii=False)
+    return json.dumps(s if not n or len(s) <= n else s[: n - 1] + "…", ensure_ascii=False)
+
+
+def _esc(s) -> str:
+    """The exact text on one line: JSON-escaped (newline = \\n, backslash = \\\\ so LaTeX is unambiguous), never shortened."""
+    return json.dumps(str(s or ""), ensure_ascii=False)
 
 
 def fmt(e: dict) -> str:
     t = e.get("type", "?")
     bid = f"[{e['id']}] " if e.get("id") else ""
     title = f"{_q(e['title'], 80)} " if e.get("title") else ""
-    note = f" — note: {_q(e['note'])}" if e.get("note") else ""
+    note = f" — note: {_q(e['note'], 0)}" if e.get("note") else ""   # notes are never cut: `...` hid half of one
     where = f"entry {e.get('entry', '?')}/{e.get('entries', '?')}"
     if e.get("stale"):
         where += f", OLDER response ({_q(e.get('entry_title'), 60)})"
@@ -147,17 +171,33 @@ def fmt(e: dict) -> str:
     if t in ("approve", "diff"):
         word = {"approve": "APPROVED", "changes": "CHANGES REQUESTED",
                 "reject": "REJECTED"}.get(e.get("decision"), str(e.get("decision")).upper())
+        if e.get("edited_text") is not None:
+            word += " (the author's OWN edited version, reviewed)"
+            note += f" — edited text: {_esc(e['edited_text'])}"
         body = f"{bid}{title}→ {word}{note}"
+    elif t == "diff_edit":
+        opt = f"option {e['option']} " if e.get("option") else ""
+        body = (f"{bid}{title}→ author EDITED {opt}the proposal and wants your opinion before approving. "
+                f"edited (full, JSON-escaped): {_esc(e.get('edited'))} "
+                f"original: {_esc(e.get('original'))}{note} "
+                f"→ answer with: panel.sh reply '#{e.get('seq')}' <opinion>  or  panel.sh alt {e.get('seq')} --note <opinion> <<'EOF' … EOF")
     elif t == "choice":
         picked = e.get("picked") or []
         if picked:
             texts = e.get("picked_text") or []
-            parts = [f"{p} ({_q(x, 120)})" if x else p for p, x in zip(picked, texts + [""] * len(picked))]
+            edited = list(e.get("picked_edited") or []) + [False] * len(picked)
+            parts = [(f"{p} (their OWN edited wording, full: {_esc(x)})" if ed else f"{p} ({_q(x, 120)})") if x else p
+                     for p, x, ed in zip(picked, texts + [""] * len(picked), edited)]
             body = f"{bid}{title}→ picked " + ", ".join(parts) + note
         else:
             body = f"{bid}{title}→ NONE of these{note}"
     elif t == "ask":
         body = f"{bid}{title}→ answer: {_q(e.get('answer'), 2000)}"
+    elif t == "gallery":
+        rows = e.get("rows") or []
+        which = "every row" if len(rows) > 1 else (rows[0] if rows else "?")
+        alt = " (alternate layer shown)" if e.get("alt_shown") else ""
+        body = f"{bid}{title}→ prefers column {e.get('col')} ({_q(e.get('col_label'), 80)}) for {which}{alt}{note}"
     elif t == "params":
         body = f"{bid}{title}→ values {json.dumps(e.get('values', {}), ensure_ascii=False)}{note}"
     elif t == "pin":
@@ -270,8 +310,15 @@ def cmd_wait(a) -> int:
 def cmd_show(a) -> int:
     e = _event(a.seq)
     if e is None:
-        print(f"show: no event #{a.seq}", file=sys.stderr)
+        print(f"{a.cmd}: no event #{a.seq}", file=sys.stderr)
         return 2
+    if getattr(a, "field", None):
+        if a.field not in e:
+            print(f"{a.cmd}: event #{a.seq} has no field '{a.field}' (it has: {', '.join(e)})", file=sys.stderr)
+            return 2
+        v = e[a.field]
+        print(v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, indent=1))   # raw: newlines and backslashes as typed
+        return 0
     print(json.dumps(e, ensure_ascii=False, indent=1))
     return 0
 
@@ -315,7 +362,7 @@ def _units(text: str) -> list[str]:
             continue
         if st.startswith("```"):
             flush(); fence = "```"; continue
-        if re.match(r":::(approve|diff|choice|params|checklist)\b", st):
+        if re.match(r":::(approve|diff|choice|params|checklist|gallery)\b", st):
             flush(); fence = ":::"; continue
         if not st or st.startswith(":::") or st.startswith("<"):
             flush(); continue
@@ -388,6 +435,28 @@ def cmd_suggest(a) -> int:
     return 0
 
 
+def cmd_alt(a) -> int:
+    new = sys.stdin.read().strip()
+    seq = int(a.seq.lstrip("#"))
+    if not new:
+        print("alt: alternative wording on stdin is empty (to give an opinion only, use `reply '#%d' TEXT`)" % seq, file=sys.stderr)
+        return 2
+    e = _event(seq)
+    if e is None or e.get("type") != "diff_edit":
+        print(f"alt: event #{seq} is not an edited-proposal (diff_edit) event", file=sys.stderr)
+        return 2
+    card = _card(e.get("card"))
+    if card is None:
+        print(f"alt: the card behind #{seq} is no longer in the panel", file=sys.stderr)
+        return 2
+    if card.get("rev") != e.get("rev"):
+        print(f"alt: the card was revised (r{e.get('rev')} → r{card.get('rev')}) since #{seq}", file=sys.stderr)
+        return 2
+    to_panel({"kind": "alt", "seq": seq, "text": new, "note": a.note or ""})
+    print(f"alternative wording queued beside the author's version for event #{seq}")
+    return 0
+
+
 def cmd_tick(a) -> int:
     to_panel({"kind": "tick", "id": a.id, "item": a.item, "state": a.state})
     print(f"{a.id}: item {a.item} → {a.state}")
@@ -441,7 +510,9 @@ def cmd_edit(a) -> int:
     if a.file:
         text = open(a.file).read()
     elif not sys.stdin.isatty():
-        text = sys.stdin.read()
+        import select   # an open but silent stdin (no pipe, no redirect) must not hang the command
+        if select.select([sys.stdin], [], [], 2.0)[0]:
+            text = sys.stdin.read()
     if not text or not text.strip():
         try:
             text = open(EDIT_FILE).read()
@@ -480,13 +551,22 @@ def cmd_edit(a) -> int:
             return 2
     else:
         uid = "latest"
+    st = _state()
+    real = {"latest": (st.get("entries") or [{}])[-1].get("uid"), "shown": st.get("shown_uid")}.get(uid, uid)
+    unsent = {k: v for k, v in load_drafts().get(real, {}).items() if v.get("text", "").strip()}
+    if unsent and not a.force:
+        n = sum(len(v["text"]) for v in unsent.values())
+        print(f"edit: REFUSED - Alex has unsent text on this card ({n} chars in {', '.join(sorted(unsent))}). "
+              "Re-rendering would disturb what he is typing. Post a new card with panel.sh write, or wait "
+              "until he sends it (--force overrides; his text is restored either way).", file=sys.stderr)
+        return 3
     renderer = os.path.join(os.path.dirname(os.path.abspath(__file__)), "renderer.py")
     import subprocess
     lint = subprocess.run([sys.executable, renderer, "--check"], input=text, capture_output=True, text=True)
     sys.stdout.write(lint.stdout)
     if lint.returncode not in (0, 1) or lint.stderr.strip():
         sys.stderr.write(lint.stderr or f"lint exited {lint.returncode}\n")
-    to_panel({"kind": "edit", "uid": uid, "text": text, "base": base})
+    to_panel({"kind": "edit", "uid": uid, "text": text, "base": base, "force": bool(a.force)})
     where = {"latest": "the latest card", "shown": "the card on screen"}.get(uid, f"card uid {uid}")
     print(f"edit queued for {where} (updates in place, keeps his decisions on unchanged blocks)")
     return 0
@@ -530,9 +610,12 @@ def main() -> int:
     s = sub.add_parser("events"); s.add_argument("--all", action="store_true"); s.set_defaults(f=cmd_events)
     s = sub.add_parser("watch"); s.set_defaults(f=cmd_watch)
     s = sub.add_parser("wait"); s.add_argument("--id"); s.add_argument("--timeout", type=float, default=0); s.set_defaults(f=cmd_wait)
-    s = sub.add_parser("show"); s.add_argument("seq", type=lambda v: int(v.lstrip("#"))); s.set_defaults(f=cmd_show)
+    for name in ("show", "show-event"):
+        s = sub.add_parser(name); s.add_argument("seq", type=lambda v: int(v.lstrip("#")))
+        s.add_argument("--field", help="print only this field, raw (e.g. edited)"); s.set_defaults(f=cmd_show)
     s = sub.add_parser("changed"); s.add_argument("old"); s.add_argument("new"); s.set_defaults(f=cmd_changed)
     s = sub.add_parser("reply"); s.add_argument("target"); s.add_argument("text", nargs="+"); s.set_defaults(f=cmd_reply)
+    s = sub.add_parser("alt"); s.add_argument("seq"); s.add_argument("--note"); s.set_defaults(f=cmd_alt)
     s = sub.add_parser("suggest"); s.add_argument("seq"); s.add_argument("--note"); s.set_defaults(f=cmd_suggest)
     s = sub.add_parser("tick"); s.add_argument("id"); s.add_argument("item")
     s.add_argument("state", nargs="?", default="done", choices=["todo", "doing", "done"]); s.set_defaults(f=cmd_tick)
@@ -542,6 +625,7 @@ def main() -> int:
     s = sub.add_parser("edit"); g = s.add_mutually_exclusive_group()
     g.add_argument("--latest", action="store_true"); g.add_argument("--shown", action="store_true")
     g.add_argument("--entry", type=int); g.add_argument("--event", type=lambda v: int(v.lstrip("#")))
+    s.add_argument("--force", action="store_true", help="edit even if Alex has unsent text on the card")
     s.add_argument("file", nargs="?"); s.set_defaults(f=cmd_edit)
     s = sub.add_parser("flagged"); s.add_argument("--all", action="store_true"); s.set_defaults(f=cmd_flagged)
     s = sub.add_parser("filed"); s.add_argument("files", nargs="+"); s.set_defaults(f=cmd_filed)
