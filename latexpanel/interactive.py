@@ -114,15 +114,17 @@ def _editor(text: str, base: str, opt: str | None = None) -> str:
     a live word diff, the edited -> sent -> replied steps and the Send button. Behaviour lives in the page JS."""
     o = "" if opt is None else f' data-opt="{H.escape(opt, True)}"'
     return (f'<div class="ia-ed" data-orig="{H.escape(text, True)}" data-base="{H.escape(base, True)}"{o}>'
-            f'<textarea class="ia-edta" data-ia-edit spellcheck="false" rows="3" '
+            '<div class="ia-edrich" contenteditable="true" spellcheck="true" role="textbox" aria-multiline="true" '
+            'aria-label="Edit the proposed wording (rendered)"></div>'
+            f'<textarea class="ia-edta" data-ia-edit spellcheck="false" rows="6" hidden '
             f'aria-label="Edit the proposed wording (plain text)">\n{H.escape(text)}</textarea>'
-            '<div class="ia-edsteps" hidden><span data-s="1">✎ edited</span><span data-s="2">➤ sent for review</span>'
-            '<span data-s="3">💬 Claude replied</span><span data-s="4">✓ approve my version</span></div>'
+            '<div class="ia-edbar"><div class="ia-edsteps" hidden><span data-s="1">Edited</span><span data-s="2">Sent for review</span>'
+            '<span data-s="3">Claude replied</span><span data-s="4">Approve your version</span></div>'
+            '<div class="ia-edactions"><button type="button" class="ia-btn" data-act="ed-src" title="Show or hide the raw LaTeX">Source</button>'
+            '<button type="button" class="ia-btn" data-act="ed-reset" hidden>Reset</button>'
+            '<button type="button" class="ia-btn mid" data-act="ed-send" disabled>Send for review</button></div></div>'
             '<div class="ia-edlive ia-src tex2jax_ignore" hidden></div>'
-            '<div class="ia-edalt tex2jax_ignore" hidden></div>'
-            '<div class="ia-edactions"><button type="button" class="ia-btn mid" data-act="ed-send" disabled>'
-            'Send my version for review</button>'
-            '<button type="button" class="ia-btn" data-act="ed-reset" hidden>↺ Reset to the proposal</button></div></div>')
+            '<div class="ia-edalt tex2jax_ignore" hidden></div></div>')
 
 
 # ── word diff ────────────────────────────────────────────────────────────────
@@ -1410,21 +1412,38 @@ document.addEventListener('DOMContentLoaded', function () {
 HEAD += r"""
 <style>
   .ia-edhint { padding: 6px 0 0; }
-  .ia-ed { padding: 8px 0 10px; }
-  .ia-ed .ia-edta { width: 100%; box-sizing: border-box; font: 13.5px/1.55 'JetBrains Mono', monospace; padding: 8px 10px;
-    border: 1px solid #b7c2ce; border-radius: 5px; background: #fff; color: #131a21; resize: vertical; min-height: 4.5em;
-    white-space: pre-wrap; }
-  .ia-ed[data-edited] .ia-edta { border-color: #856000; box-shadow: 0 0 0 2px #f3d98b; }
-  .ia-edsteps { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 2px; font: 12px system-ui, sans-serif; }
-  .ia-edsteps span { padding: 2px 9px; border-radius: 10px; background: #e3ebf4; color: #3f536a; border: 1px solid #c3cbd5; }
-  .ia-edsteps span.done { background: #f3e3b5; color: #6b4e00; border-color: #ecdcae; }
-  .ia-edsteps span.now { font-weight: 700; box-shadow: 0 0 0 2px #856000; }
-  .ia-ed.seen .ia-edsteps span[data-s="2"].done::after { content: " ✓"; }
-  .ia-edsteps span[data-s="3"].done, .ia-edsteps span[data-s="4"].ready { background: #cfeedd; color: #14532d; border-color: #9fd5b3; }
-  .ia-edsteps span[data-s="4"].ready { font-weight: 700; }
-  .ia-edlive { border-top: 1px dashed #c3cbd5; margin-top: 8px; }
-  .ia-edlive::before { content: attr(data-cap); display: block; font: 12px system-ui, sans-serif; color: #3f536a; padding-top: 6px; }
-  .ia-edactions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .ia-ed { padding: 10px 0 12px; }
+  .ia-ed .ia-edta { width: 100%; box-sizing: border-box; font: 400 15px/1.7 system-ui, 'Segoe UI', sans-serif; padding: 12px 14px;
+    border: 1px solid #c9d3de; border-radius: 8px; background: #fff; color: #18222d; resize: vertical; min-height: 9.5em;
+    white-space: pre-wrap; outline: none; }
+  .ia-ed .ia-edta[hidden] { display: none; }
+  .ia-ed .ia-edrich { box-sizing: border-box; width: 100%; font: 400 15.5px/1.8 'Source Serif 4', Georgia, 'Times New Roman', serif; padding: 12px 14px;
+    border: 1px solid #c9d3de; border-radius: 8px; background: #fff; color: #18222d; min-height: 9.5em; white-space: pre-wrap; outline: none; }
+  .ia-ed .ia-edrich:focus { border-color: #2b5d8a; box-shadow: 0 0 0 3px rgba(43, 93, 138, .16); }
+  .ia-ed[data-edited] .ia-edrich { border-color: #b58a1c; }
+  .ia-ed[data-src] .ia-edrich { display: none; }
+  .ia-ed[data-src] .ia-edta { display: block; }
+  .ia-chip { display: inline-block; font: 500 13px/1.45 system-ui, sans-serif; padding: 0 6px; margin: 0 1px; border-radius: 5px;
+    background: #e6eef7; color: #2b5d8a; user-select: all; cursor: default; white-space: nowrap; }
+  .ia-chip.ref { background: #eceff3; color: #52606f; }
+  .ia-chip.fmt { background: none; color: inherit; padding: 0; font: inherit; }
+  .ia-chip.math { background: #f3f6f9; color: #18222d; padding: 0 5px; font-size: 15px; }
+  .ia-ed .ia-edta:focus { border-color: #2b5d8a; box-shadow: 0 0 0 3px rgba(43, 93, 138, .16); }
+  .ia-ed[data-edited] .ia-edta { border-color: #b58a1c; }
+  .ia-edbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+  .ia-edsteps { display: flex; align-items: center; font: 12.5px system-ui, sans-serif; color: #8996a5; min-height: 28px; }
+  .ia-edsteps[hidden] { display: flex; visibility: hidden; }
+  .ia-edsteps span { padding: 0; background: none; border: 0; border-radius: 0; }
+  .ia-edsteps span + span::before { content: "\203A"; margin: 0 9px; color: #b9c4d0; }
+  .ia-edsteps span.done { color: #7a5a00; }
+  .ia-edsteps span.now { color: #18222d; font-weight: 600; box-shadow: none; }
+  .ia-ed.seen .ia-edsteps span[data-s="2"].done::after { content: " \2713"; }
+  .ia-edsteps span[data-s="3"].done { color: #14532d; }
+  .ia-edsteps span[data-s="4"].ready { color: #14532d; font-weight: 700; }
+  .ia-ed .ia-edlive { margin-top: 12px; padding: 10px 14px 12px; background: #f4f7fa; border: 0; border-radius: 8px; font: 400 14px/1.7 system-ui, 'Segoe UI', sans-serif; }
+  .ia-ed .ia-edlive::before { content: attr(data-cap); display: block; font: 600 11.5px system-ui, sans-serif; letter-spacing: .02em;
+    text-transform: uppercase; color: #6b7a8b; padding: 0 0 4px; }
+  .ia-edactions { display: flex; gap: 8px; margin: 0; }
   .ia-edalt { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
   .ia-edalt > div { border: 1px solid #c3cbd5; border-radius: 6px; background: #fff; padding: 6px 10px 8px; }
   .ia-edalt > div.claude { border-left: 3px solid #2b5d8a; }
@@ -1485,9 +1504,104 @@ HEAD += r"""
   }
   IA.edOpen = function (ed) { var o = ed.closest('.ia-opt'); if (o) o.classList.add('editing'); };
 
+  // grow the box to its text; a box in a hidden tab measures 0, so refit when it becomes visible
+  function fit(ta) {
+    function go() { ta.style.height = 'auto'; var h = ta.scrollHeight; if (h) ta.style.height = (h + 2) + 'px'; }
+    go();
+    if (!ta._ro && window.ResizeObserver) {
+      ta._w = ta.clientWidth;
+      ta._ro = new ResizeObserver(function () { if (ta.clientWidth !== ta._w) { ta._w = ta.clientWidth; if (ta._w) go(); } });
+      ta._ro.observe(ta);
+    }
+  }
+
+  // ── rendered editing view: prose is editable text; citations, references and maths are atomic chips that carry
+  // their LaTeX source in data-src, so the textarea (the source of truth) round-trips exactly.
+  var CHIP = /\\(citep|citet|citealt|citep\*|cite)\{([^}]*)\}|(?:~)?\\(ref|eqref|cref)\{([^}]*)\}|\$\$[^$]+\$\$|\$[^$\n]+\$|\\textsc\{([^}]*)\}|\\emph\{([^}]*)\}|\\,|~/g;
+  function citeLabel(k) {
+    var m = /^([A-Za-z]+?)_?((?:19|20)\d\d)/.exec(k.trim());
+    return m ? m[1].charAt(0).toUpperCase() + m[1].slice(1) + ' ' + m[2] : k.trim();
+  }
+  function chipEl(src, m) {
+    var s = document.createElement('span'); s.className = 'ia-chip'; s.contentEditable = 'false'; s.dataset.src = src;
+    if (m[1]) {
+      var parts = m[2].split(',').map(citeLabel);
+      s.textContent = m[1] === 'citet' ? parts.join('; ').replace(/ (\d{4})/, ' ($1)') : '(' + parts.join('; ') + ')'; s.title = src;
+    } else if (m[3]) { s.className += ' ref'; s.textContent = '▸ ' + m[4]; s.title = src; }
+    else if (src === '\\,') { s.className += ' fmt'; s.textContent = ' '; }
+    else if (src === '~') { s.className += ' fmt'; s.textContent = ' '; }
+    else if (m[5] !== undefined) { s.className += ' fmt'; s.textContent = m[5]; s.style.fontVariant = 'small-caps'; s.title = src; }
+    else if (m[6] !== undefined) { s.className += ' fmt'; s.textContent = m[6]; s.style.fontStyle = 'italic'; s.title = src; }
+    else { s.className += ' math'; s.textContent = src.indexOf('$$') === 0 ? '\\[' + src.slice(2, -2) + '\\]' : '\\(' + src.slice(1, -1) + '\\)'; s.title = src; }
+    return s;
+  }
+  function richBuild(ed) {
+    var box = ed.querySelector('.ia-edrich'), text = ed.querySelector('textarea').value.replace(/^\n/, '');
+    box.innerHTML = '';
+    var last = 0, m; CHIP.lastIndex = 0;
+    while ((m = CHIP.exec(text))) {
+      if (m.index > last) box.appendChild(document.createTextNode(text.slice(last, m.index)));
+      box.appendChild(chipEl(m[0], m)); last = m.index + m[0].length;
+      if (m[0].length === 0) CHIP.lastIndex++;
+    }
+    if (last < text.length) box.appendChild(document.createTextNode(text.slice(last)));
+    try { var maths = box.querySelectorAll('.ia-chip.math'); if (maths.length) MathJax.startup.promise.then(function () { return MathJax.typesetPromise([box]); }); } catch (e) {}
+  }
+  function richText(box) {
+    var out = '';
+    (function walk(n) {
+      for (var c = n.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 3) out += c.nodeValue.replace(/ /g, ' ');
+        else if (c.nodeType === 1) {
+          if (c.dataset && c.dataset.src !== undefined) out += c.dataset.src;
+          else if (c.tagName === 'BR') out += '\n';
+          else { if (out && !/\n$/.test(out) && /^(DIV|P)$/.test(c.tagName)) out += '\n'; walk(c); }
+        }
+      }
+    })(box);
+    return out;
+  }
+  function richSync(ed, force) {   // textarea -> rendered view when they differ (reset, restore, Claude's wording)
+    var box = ed.querySelector('.ia-edrich'), ta = ed.querySelector('textarea');
+    if (force || richText(box) !== ta.value.replace(/^\n/, '')) richBuild(ed);
+  }
+  function richInput(ed) {         // rendered view -> textarea (the source of truth), then the usual input handling
+    var ta = ed.querySelector('textarea'); ta.value = '\n' + richText(ed.querySelector('.ia-edrich'));
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  // typing the closing brace or dollar of \citep{..}, \ref{..} or $..$ turns it into a chip at once, caret kept after it
+  var TAIL = /(\\(?:citep|citet|citealt|cite)\{[^}]*\}|~?\\(?:ref|eqref|cref)\{[^}]*\}|\$[^$\n]+\$)$/;
+  function chipAtCaret(box) {
+    var sel = getSelection(); if (!sel.rangeCount || !sel.isCollapsed) return;
+    var n = sel.anchorNode; if (!n || n.nodeType !== 3 || !box.contains(n)) return;
+    var off = sel.anchorOffset, before = n.nodeValue.slice(0, off), m = TAIL.exec(before); if (!m) return;
+    var re = new RegExp(CHIP.source), mm = re.exec(m[0]); if (!mm || mm[0] !== m[0]) return;
+    var chip = chipEl(m[0], mm), after = document.createTextNode(n.nodeValue.slice(off));
+    n.nodeValue = before.slice(0, m.index); n.parentNode.insertBefore(chip, n.nextSibling); n.parentNode.insertBefore(after, chip.nextSibling);
+    var r = document.createRange(); r.setStart(after, 0); r.collapse(true); sel.removeAllRanges(); sel.addRange(r);
+    try { if (chip.classList.contains('math')) MathJax.startup.promise.then(function () { return MathJax.typesetPromise([chip]); }); } catch (e) {}
+  }
+  document.addEventListener('input', function (e) {
+    var b = e.target; if (!b || !b.classList || !b.classList.contains('ia-edrich')) return;
+    richInput(b.closest('.ia-ed'));
+    if (e.inputType === 'insertText' && (e.data === '}' || e.data === '$')) chipAtCaret(b);
+  });
+  document.addEventListener('keydown', function (e) {
+    var b = e.target; if (!b || !b.classList || !b.classList.contains('ia-edrich')) return;
+    if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); var s = b.closest('.ia-ed').querySelector('[data-act=ed-send]'); if (!s.disabled) s.click(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); document.execCommand('insertText', false, '\n'); }
+  });
+  document.addEventListener('paste', function (e) {
+    var b = e.target; if (!b || !b.classList || !b.classList.contains('ia-edrich')) return;
+    e.preventDefault(); var txt = (e.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText', false, txt); setTimeout(function () { var ed = b.closest('.ia-ed'); richInput(ed); richBuild(ed); }, 0);
+  });
+  document.addEventListener('focusout', function (e) {   // chipify anything typed as raw LaTeX once the box loses focus
+    var b = e.target; if (b && b.classList && b.classList.contains('ia-edrich')) richBuild(b.closest('.ia-ed'));
+  });
   function render(ed) {
     var ta = ed.querySelector('textarea'), st = stOf(ed), step = stepOf(ed), block = ed.closest('.ia'), isOpt = !!ed.closest('.ia-opt');
-    ta.style.height = 'auto'; ta.style.height = Math.max(ta.scrollHeight + 2, 72) + 'px';
+    fit(ta); richSync(ed);
     if (step) ed.setAttribute('data-edited', ''); else ed.removeAttribute('data-edited');
     var steps = ed.querySelector('.ia-edsteps'); steps.hidden = !step;
     $all(steps, 'span').forEach(function (sp) {
@@ -1598,6 +1712,7 @@ HEAD += r"""
       render(ed); return;
     }
     var ta = ed.querySelector('textarea'), st = stOf(ed);
+    if (act === 'ed-src') { if (ed.hasAttribute('data-src')) { ed.removeAttribute('data-src'); richBuild(ed); b.textContent = 'Source'; } else { ed.setAttribute('data-src', ''); b.textContent = 'Rendered'; var q = ed.querySelector('textarea'); q.hidden = false; fit(q); } return; }
     if (act === 'ed-reset') { ta.value = ed.dataset.orig; render(ed); sync(ed, true); return; }
     if (act === 'ed-use') { ta.value = st.alt; render(ed); sync(ed, false); return; }
     if (act === 'ed-send') {
