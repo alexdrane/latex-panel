@@ -70,8 +70,19 @@ PDF/image viewer with before/after compare modes and click-to-pin comments
 (run it under Claude Code's Monitor tool); `events` / `wait` catch up or block when no
 watch is running. Hover a paragraph and click ✎ (or Tab to it and press Enter) to ask
 for a rewrite; replies from Claude collect in a strip above the message bar that folds
-away. Syntax is in [`SKILL.md`](SKILL.md). PDF pages are rasterised with `pdftoppm`
+away. The proposed text in `:::diff` cards and `:::choice` options is editable in place
+(plain text, live word diff): **Send my version for review** emits a `diff_edit` event, Claude
+replies with an opinion (`panel.sh reply '#SEQ'`, or `panel.sh alt SEQ` with alternative wording
+shown beside yours), and only then can **Approve my version** be pressed. No new syntax.
+`panel.sh show-event SEQ [--field F]` prints one event in full. Syntax is in [`SKILL.md`](SKILL.md). PDF pages are rasterised with `pdftoppm`
 (poppler-utils).
+
+### Remote view (optional)
+
+`scripts/panel.sh remote on` also serves the running panel over HTTP, so a tablet or phone browser
+on the same network can follow along and click approve/choice/MCQ blocks. It prints a URL with an
+access token. The desktop window stays the source of truth (one history, one event log), and
+`remote off` stops it. Nothing changes unless you switch it on. See `latexpanel/remote.py`.
 
 ## LaTeX notes
 

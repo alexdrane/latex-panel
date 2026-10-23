@@ -6,7 +6,7 @@
 #   panel.sh current [--latest|--entry N|--event SEQ]  - copy a card's markdown to edit.md (prints the path)
 #   panel.sh edit [--latest|--shown|--entry N|--event SEQ] [FILE] - replace a card IN PLACE from stdin/FILE/edit.md
 #   panel.sh status   - report whether the panel is running
-#   panel.sh stop     - close the panel
+#   panel.sh stop [--force] - close the panel (--force required for Codex channels)
 #   panel.sh manim [-q l|m|h] [-s Scene]  - OPTIONAL: Manim scene .py on stdin -> render ->
 #                       prints a ':::video <path>' line to put in the markdown you `write`.
 #                       Failed renders print the error and exit 1; nothing is shown.
@@ -15,14 +15,20 @@
 #   panel.sh watch    - stream user actions, one line each; run it under the Monitor tool
 #   panel.sh events   - print unread actions (catch-up when no watch was running)
 #   panel.sh wait [--id ID] [--timeout S]  - block until the user acts (on block ID)
-#   panel.sh show SEQ                      - one event in full (watch lines are shortened)
+#   panel.sh show SEQ | show-event SEQ [--field F]  - one event's full JSON (--field edited: just that text, raw)
 #   panel.sh changed OLD.pdf NEW.pdf       - which pages differ visually
 #
 #   Claude -> panel (live updates, no new history entry):
 #   panel.sh reply ID|'#SEQ' TEXT...       - show a reply under a block / in the chat strip
 #   panel.sh suggest SEQ [--note N] < new  - in-place rewrite for a `rewrite` event
+#   panel.sh alt SEQ [--note N] < wording  - your opinion + alternative wording beside the author's edited proposal
+#                                            (`diff_edit` event); `reply '#SEQ' TEXT` is an opinion without an alternative
 #   panel.sh tick ID ITEM [todo|doing|done]- update a :::checklist item
 #   panel.sh flagged [--all] / filed FILE  - flagged responses awaiting / done filing to notes
+#
+#   OPTIONAL remote view (off by default) - the same panel in a tablet/phone browser:
+#   panel.sh remote on [--bind lan|tailscale|all|IP] [--port N]  - serve it; prints the URL to open
+#   panel.sh remote off | status | url
 #
 # The panel is a GTK process; it must be running for anything to be visible.
 # This script is the only thing the skill calls.
@@ -32,8 +38,21 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RENDERER="$REPO/latexpanel/renderer.py"
 EVENTS_PY="$REPO/latexpanel/events.py"
-WATCH_FILE="/tmp/claude_response.md"
-PAT="latexpanel/renderer.py"
+# Channels: LATEX_PANEL_CHANNEL=name gives a separate window, watch file, event log and cursor,
+# so several Claude sessions (e.g. one per workstream in tmux) each get their own panel.
+CH="${LATEX_PANEL_CHANNEL:-}"
+if [[ -n $CH ]]; then
+  [[ $CH =~ ^[A-Za-z0-9_-]+$ ]] || { echo "LATEX_PANEL_CHANNEL must be [A-Za-z0-9_-]" >&2; exit 2; }
+  export LATEX_PANEL_WATCH="/tmp/claude_response.$CH.md"
+  export LATEX_PANEL_DATA="$HOME/.local/share/latex-panel/ch/$CH"
+  mkdir -p "$LATEX_PANEL_DATA"
+  WATCH_FILE="$LATEX_PANEL_WATCH"
+  PAT="latexpanel/renderer.py --channel $CH\$"
+else
+  WATCH_FILE="/tmp/claude_response.md"
+  PAT="latexpanel/renderer.py$"
+fi
+LOG="/tmp/latex-panel${CH:+.$CH}.log"
 
 running() { pgrep -f "$PAT" >/dev/null 2>&1; }
 
@@ -42,14 +61,22 @@ ensure() {
     echo "panel already running (pid $(pgrep -f "$PAT" | head -1))"
     return 0
   fi
-  # Detach fully so the panel outlives this shell / tool call.
-  nohup python3 "$RENDERER" >/tmp/latex-panel.log 2>&1 &
-  disown || true
+  if [[ $CH == codex || $CH == codex_* ]] && command -v systemd-run >/dev/null; then
+    # Codex tool sessions can reap their child processes when a call finishes.
+    # Put the GTK window in the user service manager so it survives the call.
+    systemd-run --user --collect --unit="latex-panel-$CH" \
+      --setenv="LATEX_PANEL_WATCH=$WATCH_FILE" \
+      --setenv="LATEX_PANEL_DATA=$LATEX_PANEL_DATA" \
+      /usr/bin/python3 "$RENDERER" --channel "$CH" >"$LOG" 2>&1 || return 1
+  else
+    nohup python3 "$RENDERER" ${CH:+--channel "$CH"} >"$LOG" 2>&1 &
+    disown || true
+  fi
   for _ in $(seq 1 20); do
     running && { echo "panel started"; return 0; }
     sleep 0.2
   done
-  echo "panel failed to start; see /tmp/latex-panel.log" >&2
+  echo "panel failed to start; see $LOG or the user journal" >&2
   return 1
 }
 
@@ -104,17 +131,26 @@ case "${1:-ensure}" in
     ensure >/dev/null
     exec python3 -u "$EVENTS_PY" "$@"
     ;;
-  watch|events|wait|show|changed|reply|suggest|tick|flagged|filed|current)
+  watch|events|wait|show|show-event|changed|reply|alt|suggest|tick|flagged|filed|current)
     exec python3 -u "$EVENTS_PY" "$@"
+    ;;
+  remote)
+    shift; exec bash "$REPO/scripts/remote.sh" "$@"
     ;;
   status)
     if running; then echo "running (pid $(pgrep -f "$PAT" | head -1))"; else echo "not running"; fi
     ;;
   stop)
+    # Codex sessions can overlap. A routine agent restart must not close a
+    # window that another session (or Alex) is still using.
+    if [[ $CH == codex || $CH == codex_* ]] && [[ ${2:-} != --force ]]; then
+      echo "refusing to stop shared Codex panel; use stop --force only when Alex explicitly requests closure" >&2
+      exit 2
+    fi
     pkill -f "$PAT" && echo "panel stopped" || echo "panel was not running"
     ;;
   *)
-    echo "usage: panel.sh {ensure|write|edit|current|status|stop|watch|events|wait|show|changed|reply|suggest|tick|flagged|filed|manim [-q l|m|h] [-s Scene]}" >&2
+    echo "usage: panel.sh {ensure|write|edit|current|status|stop [--force]|remote on|off|status|url|watch|events|wait|show|show-event|changed|reply|alt|suggest|tick|flagged|filed|manim [-q l|m|h] [-s Scene]}" >&2
     exit 2
     ;;
 esac

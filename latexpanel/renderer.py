@@ -22,6 +22,7 @@ WATCH_FILE  = os.environ.get("LATEX_PANEL_WATCH", "/tmp/claude_response.md")
 DATA_DIR    = os.environ.get("LATEX_PANEL_DATA", os.path.expanduser("~/.local/share/latex-panel"))
 FLAGGED_DIR = os.path.join(DATA_DIR, "flagged")
 QUIZ_LOG    = os.path.join(DATA_DIR, "quiz_results.jsonl")
+REMOTE_FLAG = os.path.join(DATA_DIR, "remote.on")   # present = also serve the panel to a browser (remote.py)
 
 # ---------------------------------------------------------------------------
 # HTML template – all JS/CSS braces doubled because we use str.format()
@@ -549,6 +550,8 @@ class HistoryEntry:
         self.pending_rw: dict[int, int] = {}    # paragraph → seq of the rewrite request waiting on it
         self.ticks: list[tuple] = []            # (checklist id, item, state) in order applied
         self.replies: list[tuple] = []          # (block id or None, text, iso ts)
+        # the author's own wording of a proposal: "id" or "id::option" -> {id, option, orig, text, replied, alt, seq, final}
+        self.edits: dict[str, dict] = {}
 
     def ids(self) -> set[str]:
         return {b[1] for b in self.blocks} | {s["id"] for s in self.suggestions.values()}
@@ -569,7 +572,8 @@ class HistoryEntry:
 # ---------------------------------------------------------------------------
 class RendererWindow(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Claude")
+        _ch = os.environ.get("LATEX_PANEL_CHANNEL", "")
+        super().__init__(title="Claude" + (f" · {_ch}" if _ch else ""))
         self.set_default_size(760, 720)
         self.set_keep_above(True)
         self.set_decorated(True)
@@ -581,6 +585,10 @@ class RendererWindow(Gtk.Window):
         self._mtime = None
         self._restore_y = 0
         self._seen = events.seen_cursor()   # highest event seq a Claude session has read
+        self._drafts = events.load_drafts()   # card uid -> {field key: {text, ts}}: what Alex has typed but not sent
+        self._remote = None                 # remote.RemoteServer while `panel.sh remote on`
+        self._remote_cfg = None             # mtime of the REMOTE_FLAG it was started from
+        self._last_html = None
 
         # ── UserContentManager for quiz recording ─────────────────
         self._ucm = WebKit2.UserContentManager()
@@ -697,6 +705,7 @@ class RendererWindow(Gtk.Window):
                 self._lbl_listen.set_tooltip_text(
                     "No Claude session is watching right now - clicks are queued and\n"
                     "Claude sees them next time it checks (panel.sh events)")
+            self._push_bar()
         return True
 
     def _emit(self, data: dict, entry: "HistoryEntry | None" = None) -> dict:
@@ -714,12 +723,38 @@ class RendererWindow(Gtk.Window):
         print(f"panel: {text}", file=sys.stderr)
         events.append({"type": "panel_error", "text": text, **extra})
 
+    def _set_draft(self, data: dict):
+        uid, key, text = data.get("card") or "_global", str(data.get("key") or ""), data.get("text") or ""
+        if not key:
+            return
+        card = self._drafts.setdefault(uid, {})
+        if text.strip():
+            card[key] = {"text": text, "ts": datetime.datetime.now().isoformat()}
+        else:
+            card.pop(key, None)
+            if not card:
+                self._drafts.pop(uid, None)
+        events.save_drafts(self._drafts)
+
+    def _unsent(self, uid) -> dict:
+        return {k: v for k, v in self._drafts.get(uid, {}).items() if v.get("text", "").strip()}
+
     def _entry_by_uid(self, uid):
         return next((e for e in self._history if e.uid == uid), None)
 
     def _on_claude_event(self, _mgr, js_result):
         try:
             data = json.loads(js_result.get_js_value().to_json(0))
+        except Exception as e:
+            print(f"claudeEvent failed: {e}", file=sys.stderr)
+            return
+        self._claude_event(data)
+
+    def _claude_event(self, data: dict, origin: str = "desktop"):
+        try:
+            if data.get("type") == "_draft":   # keystrokes, not a click: remember them, never emit
+                self._set_draft(data)
+                return
             cid = data.get("cid")
             # the page says which card + revision the click was made on; never guess another one
             entry = self._entry_by_uid(data.pop("card", None))
@@ -733,8 +768,16 @@ class RendererWindow(Gtk.Window):
                 if entry is not None and self._shown(entry):
                     GLib.timeout_add(1200, lambda: (self._reload_keep_scroll(), False)[1])
                 return
-            ev = self._emit(data, entry)
             t = data.get("type")
+            why = self._unreviewed_edit(entry, data)
+            if why:   # backstop for the page's own gate (a stale tab, the remote view)
+                self._notice(f"ignored {t} on '{data.get('id')}': {why}", rejected=data)
+                if cid:
+                    self._js(f"IA.refused({json.dumps(cid)}, {json.dumps('Not sent - ' + why + '. Reloading.')})")
+                if self._shown(entry):
+                    GLib.timeout_add(1200, lambda: (self._reload_keep_scroll(), False)[1])
+                return
+            ev = self._emit(data, entry)
             self._seq_map[ev["seq"]] = (entry, ev)
             if t == "rewrite":
                 entry.pending_rw[int(data["para"])] = ev["seq"]
@@ -742,6 +785,8 @@ class RendererWindow(Gtk.Window):
                 entry.ticks.append((data["id"], data["item"], data["state"]))
             elif t == "pin":
                 entry.pins.setdefault(data["id"], []).append(ev)
+            elif t == "diff_edit":
+                self._record_edit(entry, ev)
             elif data.get("id") and t not in ("selection", "message", "check_add"):
                 entry.decisions[data["id"]] = ev
             if cid:
@@ -749,14 +794,106 @@ class RendererWindow(Gtk.Window):
             if t == "diff" and data.get("decision") == "approve":
                 sg = next((s for s in entry.suggestions.values() if s["id"] == data.get("id")), None)
                 if sg:
+                    if data.get("edited_text") is not None:   # the author's own wording of Claude's rewrite
+                        sg = {**sg, "new": self._norm_text(data["edited_text"])}
                     self._commit_rewrite(entry, sg)
+            if entry.edits:
+                self._write_state()   # tools applying the card (apply_card) read the author's approved wording from state.json
             self._update_pending()
+            self._sync_other_view(entry, origin)
         except Exception as e:
             print(f"claudeEvent failed: {e}", file=sys.stderr)
+
+    # ── the author's own wording of a proposal (diff "New" text, choice options) ──
+
+    @staticmethod
+    def _edit_key(bid: str, option=None) -> str:
+        return bid if option is None else f"{bid}::{option}"
+
+    def _record_edit(self, entry: "HistoryEntry", ev: dict):
+        """A `diff_edit` was sent: remember the exact text so a re-render restores it and Claude's reply can find it."""
+        rec = {"id": ev["id"], "option": ev.get("option"), "orig": ev.get("original", ""),
+               "text": ev.get("edited", ""), "replied": False, "alt": None, "seq": ev["seq"], "final": False}
+        entry.edits[self._edit_key(ev["id"], ev.get("option"))] = rec
+
+    @staticmethod
+    def _norm_text(s) -> str:
+        return str(s or "").replace("\r\n", "\n").rstrip()
+
+    def _unreviewed_edit(self, entry: "HistoryEntry", data: dict) -> str:
+        """Why a diff approve / choice pick carrying the author's edited text must not be accepted yet ('' = fine).
+        Approving your own wording is allowed only after you sent it and Claude replied (or it is Claude's alternative)."""
+        t = data.get("type")
+        if t == "diff" and data.get("decision") == "approve" and data.get("edited_text") is not None:
+            todo = [(None, data["edited_text"])]
+        elif t == "choice" and any(data.get("picked_edited") or []):
+            todo = [(lab, txt) for lab, txt, ed in zip(data.get("picked") or [], data.get("picked_text") or [],
+                                                      data.get("picked_edited") or []) if ed]
+        else:
+            return ""
+        for opt, text in todo:
+            rec = entry.edits.get(self._edit_key(data.get("id", ""), opt))
+            text = self._norm_text(text)
+            if not rec or not rec["replied"] or text not in (self._norm_text(rec["text"]), self._norm_text(rec["alt"])):
+                return "your edited wording hasn't been sent for review and answered by Claude yet"
+        for opt, text in todo:   # accepted: this is now the version that was approved
+            rec = entry.edits[self._edit_key(data.get("id", ""), opt)]
+            rec["text"], rec["final"] = text, True
+        return ""
+
+    def _edit_approved(self, entry: "HistoryEntry", rec: dict) -> bool:
+        """True while the author's decision on the block is "approve / pick" of exactly this edited wording."""
+        d = entry.decisions.get(rec["id"]) or {}
+        if not rec["final"]:
+            return False
+        if rec["option"] is None:
+            return d.get("type") == "diff" and d.get("decision") == "approve" and \
+                self._norm_text(d.get("edited_text")) == self._norm_text(rec["text"])
+        picked = d.get("picked") or []
+        return rec["option"] in picked and bool((d.get("picked_edited") or [])[picked.index(rec["option"])])
+
+    def _edit_replied(self, entry: "HistoryEntry", bid: str, ev: dict | None = None):
+        """Claude replied to block `bid` (or to the specific diff_edit event `ev`): the sent version can now be approved."""
+        for rec in entry.edits.values():
+            if rec["id"] != bid or rec["replied"]:
+                continue
+            if ev is not None and ev.get("type") == "diff_edit" and rec["seq"] != ev["seq"]:
+                continue
+            rec["replied"] = True
+            self._write_state()
+            if self._shown(entry):
+                self._js(f"IA.editReplied({json.dumps(bid)}, {json.dumps(rec['option'])})")
+
+    def _alt(self, msg: dict, now: str):
+        seq = int(msg["seq"])
+        entry, ev = self._seq_map.get(seq, (None, None))
+        if not ev or ev.get("type") != "diff_edit":
+            self._notice(f"alt #{seq} dropped: not an edited-proposal event from this panel session")
+            return
+        if entry not in self._history:
+            self._notice(f"alt #{seq} dropped: its card was deleted")
+            return
+        rec = entry.edits.get(self._edit_key(ev["id"], ev.get("option")))
+        if ev.get("rev") != entry.rev or not rec:
+            self._notice(f"alt #{seq} dropped: the card was revised since the author sent that edit "
+                         f"(r{ev.get('rev')} → r{entry.rev}), so it is no longer on screen")
+            return
+        if rec["seq"] != seq:
+            self._notice(f"alt #{seq} dropped: the author has since sent a newer version (#{rec['seq']}); answer that one")
+            return
+        rec["replied"], rec["alt"] = True, msg["text"]
+        self._write_state()
+        note = msg.get("note") or "Suggested alternative wording - compare it with yours below."
+        entry.replies.append((ev["id"], note, now))
+        if self._shown(entry):
+            self._js(f"IA.editReplied({json.dumps(ev['id'])}, {json.dumps(rec['option'])}, {json.dumps(msg['text'])})")
+            self._js(f"IA.reply({json.dumps(ev['id'])}, {json.dumps(note)}, {json.dumps(now)})")
 
     # ── Claude → panel (replies, rewrite suggestions, checklist ticks) ──
 
     def _js(self, code: str):
+        if self._remote:
+            self._remote.js(f"window.IA && ({code});")
         try:
             self._webview.evaluate_javascript(f"window.IA && ({code});", -1, None, None, None, None, None)
         except (AttributeError, TypeError):
@@ -811,10 +948,14 @@ class RendererWindow(Gtk.Window):
                     return
                 bid = target
             entry.replies.append((bid, msg["text"], now))
+            if bid:
+                self._edit_replied(entry, bid, ev if target.startswith("#") else None)
             if self._shown(entry):
                 self._js(f"IA.reply({json.dumps(bid)}, {json.dumps(msg['text'])}, {json.dumps(now)})")
         elif kind == "suggest":
             self._suggest(msg, now)
+        elif kind == "alt":
+            self._alt(msg, now)
         elif kind == "edit":
             self._apply_edit(msg)
         elif kind == "tick":
@@ -895,6 +1036,8 @@ class RendererWindow(Gtk.Window):
             out = f"answered “{ev.get('answer', '')[:200]}”"
         elif t == "params":
             out = "sent values " + json.dumps(ev.get("values", {}))[:200]
+        elif t == "gallery":
+            out = f"preferred column {ev.get('col')} ({ev.get('col_label', '')})"
         else:
             out = t or "responded"
         if ev.get("note"):
@@ -912,6 +1055,7 @@ class RendererWindow(Gtk.Window):
         for bid in changed:
             if bid in entry.decisions:
                 entry.revised[bid] = self._describe(entry.decisions.pop(bid))
+            self._retire_edits(entry, bid)
             if bid in entry.pins:
                 entry.old_pins.setdefault(bid, []).extend(entry.pins.pop(bid))
         for bid in [b for b in entry.revised if b not in new]:
@@ -919,6 +1063,23 @@ class RendererWindow(Gtk.Window):
         entry.ticks = [t for t in entry.ticks if t[0] not in changed]
         entry.blocks = list(new_blocks)
         return changed
+
+    def _retire_edits(self, entry: "HistoryEntry", bid: str):
+        """The proposal under the author's edited wording changed: drop the edit, but say what they had."""
+        mine = {}   # label -> text
+        for k in [k for k, r in entry.edits.items() if r["id"] == bid]:
+            r = entry.edits.pop(k)
+            mine[r["option"] or "New"] = r["text"]
+        drafts = self._drafts.get(entry.uid, {})
+        for k in [k for k in drafts if k == f"e:{bid}" or k.startswith(f"e:{bid}:")]:   # unsent text (only with --force)
+            mine[k[len(f"e:{bid}:"):] or "New"] = drafts.pop(k)["text"]
+        if not drafts:
+            self._drafts.pop(entry.uid, None)
+        if mine:
+            events.save_drafts(self._drafts)
+            had = "; ".join((f"{lab}: " if lab != "New" else "") + f"“{txt}”" for lab, txt in mine.items())
+            prev = entry.revised.get(bid)
+            entry.revised[bid] = (prev + " | " if prev else "") + f"the proposal changed, so your edited wording was reset (you had {had})"
 
     def _apply_edit(self, msg: dict):
         target = msg.get("uid")
@@ -931,6 +1092,13 @@ class RendererWindow(Gtk.Window):
         if entry is None:
             self._notice(f"edit dropped: card {target} isn't in the panel (deleted, or the panel restarted). "
                          "Use panel.sh write for a new card.")
+            return
+        unsent = self._unsent(entry.uid)
+        if unsent and not msg.get("force"):
+            n = sum(len(v["text"]) for v in unsent.values())
+            self._notice(f"edit refused: Alex has unsent text on card {entry.uid} ({n} chars in "
+                         f"{', '.join(sorted(unsent))}). Editing would re-render it under him. Post a new card "
+                         "with panel.sh write, or wait until he sends it.")
             return
         base = msg.get("base")
         if base is not None and base != entry.rev:
@@ -961,17 +1129,17 @@ class RendererWindow(Gtk.Window):
         else:
             self._write_state()
 
-    def _reload_keep_scroll(self):
+    def _reload_keep_scroll(self, mirror: bool = True):
         def done(wv, res, _data=None):
             try:
                 self._restore_y = int(wv.evaluate_javascript_finish(res).to_double())
             except Exception:
                 self._restore_y = 0
-            self._render_current()
+            self._render_current(mirror)
         try:
             self._webview.evaluate_javascript("window.scrollY", -1, None, None, None, done, None)
         except (AttributeError, TypeError):
-            self._render_current()
+            self._render_current(mirror)
 
     def _write_state(self):
         """Snapshot for `panel.sh current` / `edit`: which card is shown and every card's markdown."""
@@ -980,6 +1148,9 @@ class RendererWindow(Gtk.Window):
             "entries": [{
                 "uid": e.uid, "rev": e.rev, "index": i + 1, "title": e.title, "time": e.timestamp_str(),
                 "edited": e.edited_at.strftime("%H:%M:%S") if e.edited_at else None, "text": e.text,
+                # the author's own wording of proposals: {block id: {text, orig, replied, approved, ...}}; "approved"
+                # is true once they approved THEIR version, so a tool applying the card must use `text`, not the markdown
+                "edits": {k: {**r, "approved": self._edit_approved(e, r)} for k, r in e.edits.items()},
             } for i, e in enumerate(self._history)],
         }
         try:
@@ -1013,6 +1184,7 @@ class RendererWindow(Gtk.Window):
             self._btn_pending.show()
         else:
             self._btn_pending.hide()
+        self._push_bar()
 
     def _on_pending(self, _btn):
         pend = self._pending_entries()
@@ -1036,9 +1208,13 @@ class RendererWindow(Gtk.Window):
 
     def _on_quiz_result(self, _mgr, js_result):
         try:
-            val = js_result.get_js_value()
-            raw = val.to_json(0)
-            data = json.loads(raw)
+            data = json.loads(js_result.get_js_value().to_json(0))
+        except Exception:
+            return
+        self._quiz_result(data)
+
+    def _quiz_result(self, data: dict, origin: str = "desktop"):
+        try:
             data["session_ts"] = (
                 self._history[self._pos].timestamp.isoformat()
                 if self._pos >= 0 else datetime.datetime.now().isoformat()
@@ -1055,6 +1231,7 @@ class RendererWindow(Gtk.Window):
                     "selected": data["selected"],
                     "correct":  data["correct"],
                 }
+                self._sync_other_view(entry, origin)
         except Exception:
             pass
 
@@ -1103,6 +1280,7 @@ class RendererWindow(Gtk.Window):
             self._emit({"type": "flag", "file": path})
         else:
             btn.set_label("★ Flag")
+        self._push_bar()
 
     def _save_flagged(self, entry: HistoryEntry):
         ts = entry.timestamp.strftime("%Y%m%d_%H%M%S")
@@ -1124,15 +1302,32 @@ class RendererWindow(Gtk.Window):
         self._btn_flag.handler_unblock_by_func(self._on_flag)
         self._emit({"type": "to_notes", "file": path})
         self._js("IA.toast('Sent to Claude ✓ — filing into notes')")
+        self._push_bar()
 
     # ── rendering ────────────────────────────────────────────────
 
-    def _render_current(self):
+    def _load(self, html: str, mirror: bool = True):
+        self._last_html = html
+        self._webview.load_html(html, "file:///tmp/")
+        if self._remote and mirror:
+            self._remote.set_page(html)
+
+    def _current_page(self) -> str:
+        entry = self._history[self._pos]
+        body = render_body(entry.text)
+        if self._reconcile(entry, interactive.BLOCKS):
+            entry.rev += 1      # a recompiled PDF/image: earlier sign-off no longer covers what's shown
+        return build_page(entry.text, entry.mcq_answers or None, {
+            "card": entry.uid, "rev": entry.rev,
+            "decisions": entry.decisions, "pins": entry.pins, "suggestions": entry.suggestions,
+            "pending_rw": sorted(entry.pending_rw), "ticks": entry.ticks, "replies": entry.replies,
+            "cursor": self._seen, "revised": entry.revised, "old_pins": entry.old_pins,
+            "scroll": self._restore_y, "edits": entry.edits,
+            "drafts": {k: v["text"] for k, v in self._unsent(entry.uid).items()}}, body=body)
+
+    def _render_current(self, mirror: bool = True):
         if self._pos < 0:
-            self._webview.load_html(
-                HTML_TEMPLATE.format(body="<p style='color:#6986a7'>Waiting for response…</p>"),
-                "file:///tmp/"
-            )
+            self._load(HTML_TEMPLATE.format(body="<p style='color:#6986a7'>Waiting for response…</p>"), mirror)
             self._lbl_pos.set_text("—")
             self._lbl_time.set_markup("<small><i></i></small>")
             self._btn_prev.set_sensitive(False)
@@ -1148,26 +1343,12 @@ class RendererWindow(Gtk.Window):
         n = len(self._history)
 
         try:
-            body = render_body(entry.text)
-            if self._reconcile(entry, interactive.BLOCKS):
-                entry.rev += 1      # a recompiled PDF/image: earlier sign-off no longer covers what's shown
-            self._webview.load_html(
-                build_page(entry.text, entry.mcq_answers or None, {
-                    "card": entry.uid, "rev": entry.rev,
-                    "decisions": entry.decisions, "pins": entry.pins, "suggestions": entry.suggestions,
-                    "pending_rw": sorted(entry.pending_rw), "ticks": entry.ticks, "replies": entry.replies,
-                    "cursor": self._seen, "revised": entry.revised, "old_pins": entry.old_pins,
-                    "scroll": self._restore_y}, body=body),
-                "file:///tmp/"
-            )
+            self._load(self._current_page(), mirror)
             self._restore_y = 0
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self._webview.load_html(
-                HTML_TEMPLATE.format(body=f"<pre>Error: {e}</pre>"),
-                "file:///tmp/"
-            )
+            self._load(HTML_TEMPLATE.format(body=f"<pre>Error: {e}</pre>"), mirror)
 
         self._lbl_pos.set_text(f"{self._pos + 1} / {n}")
         edited = f" · edited {entry.edited_at.strftime('%H:%M')}" if entry.edited_at else ""
@@ -1184,6 +1365,7 @@ class RendererWindow(Gtk.Window):
         self._btn_flag.set_active(entry.flagged)
         self._btn_flag.set_label("★ Flagged" if entry.flagged else "★ Flag")
         self._btn_flag.handler_unblock_by_func(self._on_flag)
+        self._push_bar()
 
     # ── file watching ─────────────────────────────────────────────
 
@@ -1195,10 +1377,7 @@ class RendererWindow(Gtk.Window):
             with open(WATCH_FILE) as f:
                 text = f.read()
         except Exception as e:
-            self._webview.load_html(
-                HTML_TEMPLATE.format(body=f"<pre>Error reading file: {e}</pre>"),
-                "file:///tmp/"
-            )
+            self._load(HTML_TEMPLATE.format(body=f"<pre>Error reading file: {e}</pre>"))
             return
 
         if self._history and self._history[-1].text == text:
@@ -1218,7 +1397,89 @@ class RendererWindow(Gtk.Window):
             self._mtime = mtime
             self._load_file()
         self._drain_to_panel()
+        self._check_remote()
         return True
+
+    # ── optional remote view (remote.py; off unless REMOTE_FLAG exists) ──
+
+    def _check_remote(self):
+        try:
+            cfg = os.path.getmtime(REMOTE_FLAG)
+        except OSError:
+            cfg = None
+        if cfg == self._remote_cfg:
+            return
+        self._remote_cfg = cfg
+        if self._remote:
+            self._remote.stop()
+            self._remote = None
+        if cfg is None:
+            return
+        import remote
+        try:
+            with open(REMOTE_FLAG) as f:
+                opts = json.loads(f.read() or "{}")
+            self._remote = remote.RemoteServer(self, opts.get("bind", "lan"), int(opts.get("port", remote.DEFAULT_PORT)))
+            self._remote.start()
+        except Exception as e:
+            self._remote = None
+            self._notice(f"remote view failed to start: {e}")
+            try:
+                with open(remote.REMOTE_STATE, "w") as f:
+                    json.dump({"error": str(e)}, f)
+            except OSError:
+                pass
+            return
+        if self._last_html is not None:
+            self._remote.set_page(self._last_html)
+        self._push_bar()
+
+    def _push_bar(self):
+        if not self._remote:
+            return
+        has = self._pos >= 0
+        e = self._history[self._pos] if has else None
+        self._remote.set_bar({
+            "has": has, "pos": self._pos + 1, "n": len(self._history),
+            "time": (e.timestamp_str() + (f" · edited {e.edited_at.strftime('%H:%M')}" if e.edited_at else "")) if e else "",
+            "can_prev": self._pos > 0, "can_next": 0 <= self._pos < len(self._history) - 1,
+            "flagged": bool(e and e.flagged), "listening": bool(self._listening),
+            "pending": sum(n for _, n in self._pending_entries()),
+        })
+
+    def _sync_other_view(self, entry, origin: str):
+        """A click on one view: re-render the other so it doesn't still offer the same decision."""
+        if not self._remote or not self._shown(entry):
+            return
+        if origin == "remote":
+            self._reload_keep_scroll(mirror=False)
+        else:
+            self._remote.set_page(self._current_page())
+
+    def _remote_message(self, name: str, data: dict):
+        if name == "claudeEvent":
+            self._claude_event(data, origin="remote")
+        elif name == "quizResult":
+            self._quiz_result(data, origin="remote")
+
+    def _remote_action(self, a: str) -> dict:
+        if a == "prev":
+            self._on_prev(None)
+        elif a == "next":
+            self._on_next(None)
+        elif a == "delete":
+            self._on_delete(None)
+        elif a == "flag" and self._pos >= 0:
+            self._btn_flag.set_active(not self._btn_flag.get_active())
+        elif a == "notes":
+            self._on_notes(None)
+        elif a == "pending":
+            pend = self._pending_entries()
+            if pend and pend[0][0] != self._pos:
+                self._pos = pend[0][0]
+                self._render_current()
+                return {"moved": True}
+        return {"moved": False}
 
 
 def check(md_text: str) -> int:
